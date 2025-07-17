@@ -143,7 +143,7 @@ class DockerRuntime(ExecutionEnvironment):
             self.logger = logger
 
         if self.backend == "docker":
-            self.client = docker.from_env(timeout=120)
+            self.client = docker.from_env(timeout=120, use_ssh_client=True)
         elif self.backend == "kubernetes":
             # Try in-cluster config first, fallback to kubeconfig
             try:
