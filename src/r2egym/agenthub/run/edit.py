@@ -15,7 +15,7 @@ from r2egym.agenthub.runtime.docker import DockerRuntime
 from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
 from r2egym.agenthub.agent.agent import AgentArgs, Agent
 
-from docker_bash_utils.docker_list_tags import fetch_docker_tags
+from r2egym.docker_bash_utils.docker_list_tags import fetch_docker_tags
 from r2egym.agenthub.utils.log import get_logger
 from r2egym.logging import setup_logging, INFO
 from r2egym.agenthub.utils.utils import get_parsed_commit
@@ -295,11 +295,159 @@ def runagent_multiple(
     logger.info(f"editagent completed on {len(ds_selected)} Docker images.")
 
 
+def attempt_wrap(attempt, *args, **kwargs):
+    result = runagent(*args, **kwargs)
+    if result is None:
+        return None
+    
+    result = json.loads(result)
+    result["attempt"] = attempt
+    return json.dumps(result)
+
+
+
+def runagent_multiattempt(
+    dataset: str,
+    split: str,
+    k: int = 1,
+    attempts: int = 1,
+    traj_dir: str = "./traj",
+    exp_name: Optional[str] = None,
+    start_idx=0,
+    max_steps=40,
+    num_restarts=1,
+    max_steps_absolute=50,
+    max_workers: Optional[int] = None,
+    llm_name="gpt-4o",
+    use_existing: bool = False,
+    skip_existing: bool = False,
+    temperature: float = 0,
+    use_fn_calling: bool = True,
+):
+    """
+    Runs the editagent agent on the first k Docker images.
+
+    Args:
+        k: The number of Docker images to process.
+        traj_dir: Directory to save trajectories.
+        exp_name: Experiment name for the JSONL file. If not provided, a unique name is generated.
+        start_idx: The starting index in the Docker images list.
+        max_steps: Maximum steps for the agent run.
+        max_workers: Maximum number of threads to use.
+    """
+    # Load the dataset
+    ds = load_dataset(dataset, split=split)
+    logger.info(f"{len(ds)}, {k}, {start_idx}")
+    # shuffle the dataset
+    ds = ds.shuffle(seed=42)
+
+    # get selected idxs
+    selected_idx = range(start_idx, start_idx + k)
+    ds_selected = [ds[i] for i in selected_idx]
+
+    # print ds_selected stats
+    logger.info(
+        f"Dataset: {dataset}, Split: {split}, Num_total: {len(ds)}, Start Index: {start_idx}, k: {k}"
+    )
+    logger.info(f"Starting editagent on {len(ds_selected)} Docker images.")
+
+    # Generate a unique experiment name if not provided
+    if exp_name is None:
+        exp_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Ensure traj_dir exists
+    traj_dir_path = Path(traj_dir)
+    traj_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate a filename for the JSONL file
+    jsonl_file = traj_dir_path / f"{exp_name}.jsonl"
+
+    if use_existing:
+        if jsonl_file.exists():
+            with open(jsonl_file) as f:
+                existing_dockers = []
+                for line in f.readlines():
+                    try:
+                        existing_dockers.append(
+                            Trajectory.load_from_model_dump_json(line).ds[
+                                "docker_image"
+                            ]
+                        )
+                    except:
+                        print("error in jsonl file")
+
+            ds_selected = [
+                ds_entry
+                for ds_entry in ds_selected
+                if ds_entry["docker_image"] not in existing_dockers
+            ]
+
+    if skip_existing:
+        old_jsonl_files_glob = f"{exp_name[:-1]}*"
+        for old_jsonl_file in traj_dir_path.glob(old_jsonl_files_glob):
+            with open(old_jsonl_file) as f:
+                existing_dockers = [
+                    loadline["ds"]["docker_image"]
+                    for line in f
+                    for loadline in [json.loads(line)]
+                    if loadline["reward"] == 1
+                ]
+
+            ds_selected = [
+                ds_entry
+                for ds_entry in ds_selected
+                if ds_entry["docker_image"] not in existing_dockers
+            ]
+
+    logger.info(
+        f"Starting editagent on {len(ds_selected)} Docker images after filtering."
+    )
+
+    # with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks to the executor using keyword arguments
+        future_to_image = {}
+        for ds_entry in ds_selected:
+            for attempt_id in range(attempts):
+                k = executor.submit(
+                    attempt_wrap,
+                    attempt=attempt_id,
+                    ds=ds_entry,
+                    exp_name=exp_name,
+                    max_steps=max_steps,
+                    num_restarts=num_restarts,
+                    max_steps_absolute=max_steps_absolute,
+                    llm_name=llm_name,
+                    temperature=temperature,
+                    use_fn_calling=use_fn_calling,
+                )
+                v = ds_entry["docker_image"]  # <-- store the docker_image from ds_entry here
+                future_to_image[k] = v
+
+        with open(jsonl_file, "a") as f:
+            for future in concurrent.futures.as_completed(future_to_image):
+                docker_image = future_to_image[
+                    future
+                ]  # <-- retrieve that stored docker_image
+                try:
+                    result = future.result()
+                    if result is not None:
+                        with file_lock:
+                            f.write(result + "\n")
+                except Exception as e:
+                    # Use docker_image from above when logging
+                    logger.error(f"Exception for Docker image {docker_image}: {e}")
+
+    logger.info(f"editagent completed on {len(ds_selected)} Docker images with {attempts} attempts.")
+
+
+
 if __name__ == "__main__":
     # Expose functions via Fire
     Fire(
         {
             "runagent": runagent,
             "runagent_multiple": runagent_multiple,
+            "runagent_multiattempt": runagent_multiattempt,
         }
     )
