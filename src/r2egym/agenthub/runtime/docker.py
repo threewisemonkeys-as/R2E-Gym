@@ -192,6 +192,27 @@ class DockerRuntime(ExecutionEnvironment):
         image_name_sanitized = image_name_sanitized.replace(":", "-")
         return f"{image_name_sanitized}-{hash_object.hexdigest()[:10]}"
 
+    def _wait_containers_ready(self, timeout: int = 120):
+        """
+        Block until all containers in the pod report ready=True
+        or raise RuntimeError after *timeout* seconds.
+        """
+        start = time.time()
+        while True:
+            pod = self.client.read_namespaced_pod(
+                name=self.container_name,
+                namespace=DEFAULT_NAMESPACE,
+                _request_timeout=20,
+            )
+            st = pod.status.container_statuses or []
+            if st and all(c.ready for c in st):
+                return
+            if time.time() - start > timeout:
+                raise RuntimeError(
+                    f"Pod '{self.container_name}' did not become Ready within {timeout}s"
+                )
+            time.sleep(1)
+
     def _start_kubernetes_pod(
         self, docker_image: str, command: str, pod_name: str, **docker_kwargs
     ):
@@ -317,6 +338,7 @@ class DockerRuntime(ExecutionEnvironment):
                 if phase == "Running":
                     self.logger.info(f"Kubernetes pod '{pod_name}' is Running.")
                     w.stop()
+                    self._wait_containers_ready()
                     break
                 if phase in ["Failed", "Succeeded", "Unknown"]:
                     w.stop()
