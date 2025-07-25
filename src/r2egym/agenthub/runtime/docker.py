@@ -146,10 +146,11 @@ class DockerRuntime(ExecutionEnvironment):
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
             # Try in-cluster config first, fallback to kubeconfig
-            try:
-                config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            # try:
+            #     config.load_incluster_config()
+            # except Exception:
+            #     config.load_kube_config()
+            config.load_kube_config()
             self.client = client.CoreV1Api()
 
         # Start the container
@@ -275,7 +276,7 @@ class DockerRuntime(ExecutionEnvironment):
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                # "imagePullSecrets": [{"name": "dockerhub-pro"}],
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
