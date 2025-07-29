@@ -276,7 +276,7 @@ class DockerRuntime(ExecutionEnvironment):
                         },
                     }
                 ],
-                # "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                "imagePullSecrets": [{"name": "dockerhub-pro"}],
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
