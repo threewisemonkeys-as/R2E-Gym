@@ -194,7 +194,7 @@ class Agent:
         while retries < self.max_retries:
             try:
                 kwargs = {
-                    "tool_choice": "none",
+                    # "tool_choice": "none",
                     "function_call": None,
                 }
                 if tools:
@@ -233,7 +233,7 @@ class Agent:
                         messages=messages_,
                         timeout=self.llm_timeout,
                         api_base=self.llm_base_url,
-                        # max_tokens=3000,
+                        max_tokens=3000,
                         **kwargs,
                     )
                 self.logger.warning(f"Querying LLM complete")
