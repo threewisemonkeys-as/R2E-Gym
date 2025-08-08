@@ -201,15 +201,41 @@ class Agent:
                     kwargs = {}
                 if "o3" not in self.llm_name and "o4" not in self.llm_name:
                     kwargs["temperature"] = temperature
-                response = litellm.completion(
-                    model=self.llm_name,
-                    tools=tools,
-                    messages=messages_,
-                    timeout=self.llm_timeout,
-                    api_base=self.llm_base_url,
-                    # max_tokens=3000,
-                    **kwargs,
-                )
+
+                if self.llm_name.startswith("capi-"):
+                    # Import the capi API method
+                    try:
+                        import sys
+                        from pathlib import Path
+                        sys.path.append(str(Path.home() / "1" / "cai"))
+                        from capi import query_capi
+                        CAPI_AVAILABLE = True
+                    except ImportError:
+                        CAPI_AVAILABLE = False
+                        query_capi = None
+                    # Use custom API implementation
+                    if not CAPI_AVAILABLE:
+                        raise ImportError(
+                            f"Model {self.llm_name} requires capi.py module at ~/1/cai/capi.py, "
+                            "but it could not be imported. Please implement the capi.py module."
+                        )
+                    # Call the custom query_capi function
+                    response = query_capi(
+                        use_model=self.llm_name.split("capi-",maxsplit=1)[1],
+                        messages=messages,
+                        tools=tools,
+                        temperature=kwargs["temperature"],
+                    )
+                else:
+                    response = litellm.completion(
+                        model=self.llm_name,
+                        tools=tools,
+                        messages=messages_,
+                        timeout=self.llm_timeout,
+                        api_base=self.llm_base_url,
+                        # max_tokens=3000,
+                        **kwargs,
+                    )
                 self.logger.warning(f"Querying LLM complete")
                 break
             except Exception as e:
