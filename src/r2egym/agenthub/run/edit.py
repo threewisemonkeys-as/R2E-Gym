@@ -323,7 +323,10 @@ def runagent_multiple(
         prepull_images: Whether to prepull Docker images in parallel before starting execution.
     """
     # Load the dataset
-    ds = load_dataset(dataset, split=split)
+    if dataset.endswith(".json"):
+        ds = load_dataset("json", data_files=dataset, split=split)
+    else:
+        ds = load_dataset(dataset, split=split)
     logger.info(f"{len(ds)}, {k}, {start_idx}")
     # shuffle the dataset
     ds = ds.shuffle(seed=42)
