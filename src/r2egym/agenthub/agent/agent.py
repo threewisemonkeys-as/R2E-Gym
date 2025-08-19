@@ -15,11 +15,19 @@ from pydantic import BaseModel
 
 import litellm
 from openai import OpenAI, AzureOpenAI
+import openai
 from azure.identity import (
     ChainedTokenCredential,
     AzureCliCredential,
     DefaultAzureCredential,
     get_bearer_token_provider,
+)
+from tenacity import (
+    Retrying,
+    retry_if_not_exception_type,
+    retry_if_exception_message,
+    stop_after_attempt,
+    wait_random_exponential,
 )
 from dotenv import load_dotenv
 
@@ -464,38 +472,62 @@ class Agent:
                                  tools: Optional[List[Dict]] = None, timeout: int = 60, 
                                  api_base: Optional[str] = None, **kwargs) -> Any:
         """
-        Call the GitHub Copilot Claude API using the cached client.
+        Call the GitHub Copilot Claude API using the cached client with retry logic for HMAC timestamp errors.
         """
-        client = self._get_copilot_client()
+        def retry_warning(retry_state):
+            exception = retry_state.outcome.exception() if retry_state.outcome else None
+            if exception:
+                self.logger.warning(
+                    f"Retrying Copilot Claude query (attempt {retry_state.attempt_number}) due to {exception.__class__.__name__}: {exception}"
+                )
+            # Special handling for HMAC timestamp errors - clear client to force new token
+            if isinstance(exception, openai.AuthenticationError) and "HMAC timestamp out of range" in str(exception):
+                self.logger.info("Refreshing client due to HMAC timestamp error")
+                self._copilot_client = None  # Clear client to force recreation with new HMAC
 
-        # Build chat request
-        request_kwargs = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": 8192,
-        }
-        
-        # Add temperature and top_p for models that support them
-        not_temperature_models = [
-            "o3-mini-2025-01-31",
-            "o3-mini-paygo", 
-            "o3-2025-04-16",
-            "o4-mini-2025-04-16",
-        ]
-        if model not in not_temperature_models:
-            if "temperature" in kwargs:
-                request_kwargs["temperature"] = kwargs["temperature"]
-            if "top_p" in kwargs:
-                request_kwargs["top_p"] = kwargs["top_p"]
-        
-        if tools:
-            request_kwargs["tools"] = tools
-            request_kwargs["tool_choice"] = "auto"
+        # Retry logic for HMAC timestamp errors
+        for attempt in Retrying(
+            stop=stop_after_attempt(20),  # Default retry count from SWE-agent
+            wait=wait_random_exponential(min=10, max=120),  # Default wait times from SWE-agent  
+            reraise=True,
+            retry=retry_if_not_exception_type((
+                # Don't retry these errors
+                KeyboardInterrupt,
+                openai.BadRequestError,
+            )) | retry_if_exception_message(match="HMAC timestamp out of range"),
+            before_sleep=retry_warning,
+        ):
+            with attempt:
+                client = self._get_copilot_client()
 
-        # Make the API call
-        response = client.chat.completions.create(**request_kwargs)
-        
-        return response
+                # Build chat request
+                request_kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": 8192,
+                }
+                
+                # Add temperature and top_p for models that support them
+                not_temperature_models = [
+                    "o3-mini-2025-01-31",
+                    "o3-mini-paygo", 
+                    "o3-2025-04-16",
+                    "o4-mini-2025-04-16",
+                ]
+                if model not in not_temperature_models:
+                    if "temperature" in kwargs:
+                        request_kwargs["temperature"] = kwargs["temperature"]
+                    if "top_p" in kwargs:
+                        request_kwargs["top_p"] = kwargs["top_p"]
+                
+                if tools:
+                    request_kwargs["tools"] = tools
+                    request_kwargs["tool_choice"] = "auto"
+
+                # Make the API call
+                response = client.chat.completions.create(**request_kwargs)
+                
+                return response
 
     def _get_azure_client(self, model: str):
         """Get or create a cached Azure OpenAI client for the specified model"""
