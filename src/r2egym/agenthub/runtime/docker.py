@@ -150,7 +150,6 @@ class DockerRuntime(ExecutionEnvironment):
                 config.load_incluster_config()
             except Exception:
                 config.load_kube_config()
-            config.load_kube_config()
             self.client = client.CoreV1Api()
 
         # Start the container
