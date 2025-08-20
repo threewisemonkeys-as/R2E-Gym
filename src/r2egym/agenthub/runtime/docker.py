@@ -506,6 +506,60 @@ class DockerRuntime(ExecutionEnvironment):
             self.run("python -m pip install chardet")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
+    
+    def update_repo(self):
+        patch_content = self.ds['patch']
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+            temp_file.write(patch_content)
+            temp_file.flush()  # Ensure content is written to disk
+            temp_file_path = temp_file.name
+            
+            
+        # Copy the file to container and clean up
+        self.copy_to_container(temp_file_path, "/bug_patch.diff")
+        os.unlink(temp_file_path)  # Clean up the temporary file
+
+        self.run("git apply /bug_patch.diff")
+
+    def setup_env_synthetic_bugs(self):
+        try:
+            commit_id = self.ds['base_commit']
+            self.run("git fetch")
+            self.run(f"git checkout {commit_id}")
+            
+            self.update_repo()
+            # Setup the run_test.sh script for subsequent testing.  
+            test_command, _ = get_test_command(self.ds)
+            eval_script_content = "\n".join(
+                [
+                    "#!/bin/bash",
+                    "set -uxo pipefail",
+                    "source /opt/miniconda3/bin/activate",
+                    f"conda activate testbed",
+                    f"cd testbed/",
+                    f": '>>>>> Start Test Output'",
+                    test_command,
+                    f": '>>>>> End Test Output'",
+                ]
+            ) + "\n"
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+                temp_file.write(eval_script_content)
+                temp_file.flush()  # Ensure content is written to disk
+                temp_file_path = temp_file.name
+            
+            # Copy the file to container and clean up
+            self.copy_to_container(temp_file_path, "/run_tests.sh")
+            os.unlink(temp_file_path)  # Clean up the temporary file
+            
+            self.run("chmod +x /run_tests.sh")
+
+            # Ensure can call and execute the tools in /usr/local/bin.
+            self.run(f"ln -s /opt/miniconda3/envs/testbed /root/.venv")
+            self.run('echo \'export PATH="/usr/local/bin:$PATH"\' >> ~/.bashrc')
+            self.run("python -m pip install chardet")
+        except Exception as e:
+            self.logger.error(f"Error setting up environment: {repr(e)}")
 
     def setup_env_swebench(self):
         try:
@@ -539,7 +593,7 @@ class DockerRuntime(ExecutionEnvironment):
         if self.swebench_verified:
             return self.setup_env_swebench()
         elif self.swesmith:
-            return self.setup_env_swesmith()
+            return self.setup_env_synthetic_bugs()
 
         try:
             # setup venv
