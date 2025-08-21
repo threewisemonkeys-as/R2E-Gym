@@ -418,9 +418,7 @@ def runagent_multiple(
                 max_iterations=max_iterations,
                 scaffold=scaffold,
                 max_tokens=max_tokens,
-            ): ds_entry[
-                "docker_image"
-            ]  # <-- store the docker_image from ds_entry here
+            ): ds_entry["docker_image"] if "docker_image" in ds_entry else ds_entry["image_name"]
             for ds_entry in ds_selected
         }
 
