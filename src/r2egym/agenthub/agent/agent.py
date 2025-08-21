@@ -4,13 +4,32 @@ import copy
 import yaml
 import json
 import time
+import uuid
+import hmac
+import hashlib
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel
 
 import litellm
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
+import openai
+from azure.identity import (
+    ChainedTokenCredential,
+    AzureCliCredential,
+    DefaultAzureCredential,
+    get_bearer_token_provider,
+)
+from tenacity import (
+    Retrying,
+    retry_if_not_exception_type,
+    retry_if_exception_message,
+    stop_after_attempt,
+    wait_random_exponential,
+)
+from dotenv import load_dotenv
 
 from r2egym.agenthub.action import Action
 from r2egym.agenthub.utils.log import get_logger
@@ -30,6 +49,47 @@ from r2egym.agenthub.tools import (
 import traceback
 logger = get_logger(__name__)  # Logger for this module
 MAX_CONTEXT_TOKENS = 65536
+
+# Azure LLM Model supported models from SWE-agent
+AZURE_SUPPORTED_MODELS = [
+    "gpt-4o",
+    "o3",
+    "o3-mini",
+    "o4-mini",
+    "gpt-4.1",
+    "gpt-4.5-preview",
+    "o1",
+    "gpt-4.1-mini"
+]
+
+# CopilotClaudeModel supported models from SWE-agent
+COPILOT_CLAUDE_SUPPORTED_MODELS = [
+    "claude-sonnet-4",
+    "gpt-4.1-2025-04-14",
+    "gpt-3.5-turbo-0613",
+    "gpt-4o-mini-2024-07-18",
+    "gpt-4-0613",
+    "gpt-4-0125-preview",
+    "gpt-4o-2024-11-20",
+    "gpt-4o-2024-05-13",
+    "gpt-4o-2024-08-06",
+    "o3-mini-2025-01-31",
+    "o3-mini-paygo",
+    "gpt-4o-copilot",
+    "text-embedding-3-small",
+    "claude-3.5-sonnet",
+    "claude-3.7-sonnet",
+    "claude-3.7-sonnet-thought",
+    "claude-opus-4",
+    "claude-opus-41",
+    "gemini-2.0-flash-001",
+    "o3-2025-04-16",
+    "o4-mini-2025-04-16",
+    "gpt-4.1-mini-2025-04-14",
+    "gpt-4.1-nano-2025-04-14",
+    "oswe-vscode",
+    "gpt-4.1-oswe-control",
+]
 
 ##############################################################################
 # AgentArgs Dataclass
@@ -151,8 +211,17 @@ class Agent:
         return token_count
 
     def model_query(
-        self, messages: List[Dict[str, str]], temperature: float = 0,) -> Dict[str, Any]:
-        """Query the LLM with the messages and measure execution time."""
+        self, messages: List[Dict[str, str]], temperature: float = 0, k_responses: int = 1) -> Tuple[List[Dict[str, Any]], float]:
+        """Query the LLM with the messages and measure execution time. 
+        
+        Args:
+            messages: List of message dictionaries for the conversation
+            temperature: Temperature for response generation
+            k_responses: Number of responses to generate (default=1 for backward compatibility)
+            
+        Returns:
+            Tuple of (list of responses, execution time). When k_responses=1, returns ([single_response], exec_time)
+        """
         response = None
         retries = 0
         tools = None
@@ -201,15 +270,41 @@ class Agent:
                     kwargs = {}
                 if "o3" not in self.llm_name and "o4" not in self.llm_name:
                     kwargs["temperature"] = temperature
-                response = litellm.completion(
-                    model=self.llm_name,
-                    tools=tools,
-                    messages=messages_,
-                    timeout=self.llm_timeout,
-                    api_base=self.llm_base_url,
-                    # max_tokens=3000,
-                    **kwargs,
-                )
+                # Handle prefix-based routing
+                if self.llm_name.startswith("trapi-"):
+                    # Extract model name after trapi- prefix
+                    actual_model = self.llm_name[6:]  # Remove "trapi-" prefix
+                    assert actual_model in AZURE_SUPPORTED_MODELS, f"Model '{actual_model}' not found in Azure supported models after removing 'trapi-' prefix"
+                    response = self._azure_api_call(
+                        model=actual_model,
+                        tools=tools,
+                        messages=messages_,
+                        timeout=self.llm_timeout,
+                        api_base=self.llm_base_url,
+                        **kwargs,
+                    )
+                elif self.llm_name.startswith("capi-"):
+                    # Extract model name after capi- prefix
+                    actual_model = self.llm_name[5:]  # Remove "capi-" prefix
+                    assert actual_model in COPILOT_CLAUDE_SUPPORTED_MODELS, f"Model '{actual_model}' not found in Copilot Claude supported models after removing 'capi-' prefix"
+                    response = self._copilot_claude_api_call(
+                        model=actual_model,
+                        tools=tools,
+                        messages=messages_,
+                        timeout=self.llm_timeout,
+                        api_base=self.llm_base_url,
+                        **kwargs,
+                    )
+                else:
+                    response = litellm.completion(
+                        model=self.llm_name,
+                        tools=tools,
+                        messages=messages_,
+                        timeout=self.llm_timeout,
+                        api_base=self.llm_base_url,
+                        # max_tokens=3000,
+                        **kwargs,
+                    )
                 self.logger.warning(f"Querying LLM complete")
                 break
             except Exception as e:
@@ -222,7 +317,307 @@ class Agent:
 
         # End timer, calculate total execution time, and include in response
         exec_time = time.time() - start_time
-        return response, exec_time
+        
+        # For k_responses > 1, generate additional responses
+        responses = [response]
+        if k_responses > 1:
+            for i in range(k_responses - 1):
+                additional_retries = 0
+                while additional_retries < self.max_retries:
+                    try:
+                        # Use same parameters as the first response
+                        kwargs = {
+                            "tool_choice": "none",
+                            "function_call": None,
+                        }
+                        if tools:
+                            kwargs = {}
+                        if "o3" not in self.llm_name and "o4" not in self.llm_name:
+                            kwargs["temperature"] = temperature
+                        
+                        # Handle prefix-based routing for additional responses
+                        if self.llm_name.startswith("trapi-"):
+                            # Extract model name after trapi- prefix
+                            actual_model = self.llm_name[6:]  # Remove "trapi-" prefix
+                            assert actual_model in AZURE_SUPPORTED_MODELS, f"Model '{actual_model}' not found in Azure supported models after removing 'trapi-' prefix"
+                            additional_response = self._azure_api_call(
+                                model=actual_model,
+                                tools=tools,
+                                messages=messages_,
+                                timeout=self.llm_timeout,
+                                api_base=self.llm_base_url,
+                                **kwargs,
+                            )
+                        elif self.llm_name.startswith("capi-"):
+                            # Extract model name after capi- prefix
+                            actual_model = self.llm_name[5:]  # Remove "capi-" prefix
+                            assert actual_model in COPILOT_CLAUDE_SUPPORTED_MODELS, f"Model '{actual_model}' not found in Copilot Claude supported models after removing 'capi-' prefix"
+                            additional_response = self._copilot_claude_api_call(
+                                model=actual_model,
+                                tools=tools,
+                                messages=messages_,
+                                timeout=self.llm_timeout,
+                                api_base=self.llm_base_url,
+                                **kwargs,
+                            )
+                        else:
+                            additional_response = litellm.completion(
+                                model=self.llm_name,
+                                tools=tools,
+                                messages=messages_,
+                                timeout=self.llm_timeout,
+                                api_base=self.llm_base_url,
+                                **kwargs,
+                            )
+                        responses.append(additional_response)
+                        self.logger.warning(f"Generated additional response {i+2}/{k_responses}")
+                        break
+                    except Exception as e:
+                        self.logger.error(f"Additional LLM query {i+2} failed @ {additional_retries}: {e}")
+                        additional_retries += 1
+                        if "RateLimitError" in str(e):
+                            time.sleep(60)
+                        if additional_retries >= self.max_retries:
+                            self.logger.error(f"Failed to generate additional response {i+2}/{k_responses} after {self.max_retries} retries")
+                            # Continue without this response rather than failing completely
+                            break
+        
+        return responses, exec_time
+
+    def _get_copilot_client(self):
+        """Get or create a cached GitHub Copilot client"""
+        if not hasattr(self, '_copilot_client') or self._copilot_client is None:
+            self._copilot_client = self._create_copilot_client()
+        return self._copilot_client
+
+    def _create_copilot_client(self):
+        """Create GitHub Copilot client with proper authentication"""
+        def create_request_hmac(hmac_secret: str) -> str:
+            """Create HMAC for request authentication"""
+            current = str(int(time.time()))
+            signature = hmac.new(
+                hmac_secret.encode("utf-8"), current.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            return f"{current}.{signature}"
+
+        def fetch_token() -> str:
+            """Fetch GitHub Copilot token using Node.js script"""
+            try:
+                vscode_copilot_dir = (
+                    os.environ.get("VSCODE_COPILOT_DIR", os.path.expanduser("~/repo/vscode-copilot"))
+                )
+                vscode_copilot_dir = os.path.expanduser(vscode_copilot_dir)
+                if not os.path.exists(vscode_copilot_dir):
+                    raise ValueError(f"vscode-copilot directory not found at: {vscode_copilot_dir}")
+                
+                result = subprocess.run(
+                    ["npx", "tsx", "src/util/node/fetch-token-standalone.js"],
+                    capture_output=True,
+                    text=True,
+                    cwd=vscode_copilot_dir,
+                )
+                
+                if result.returncode != 0:
+                    raise ValueError(f"Failed to fetch token: {result.stderr}")
+                
+                token = result.stdout.strip()
+                if not token:
+                    raise ValueError("fetch-token.js returned empty output")
+                
+                return token
+            except Exception as e:
+                raise ValueError(f"Failed to get Copilot token: {e}")
+
+        # Load environment variables
+        vscode_copilot_dir = (
+            os.environ.get("VSCODE_COPILOT_DIR", os.path.expanduser("~/repo/vscode-copilot"))
+        )
+        env_file_path = os.path.expanduser(os.path.join(vscode_copilot_dir, ".env"))
+
+        if not os.environ.get("HMAC_SECRET") and os.path.exists(env_file_path):
+            try:
+                load_dotenv(dotenv_path=env_file_path)
+            except Exception as e:
+                self.logger.warning("Failed to load .env file: %s", e)
+
+        hmac_secret = os.environ.get("HMAC_SECRET")
+        if not hmac_secret:
+            raise ValueError("HMAC_SECRET not found in environment variables")
+        
+        bearer_token = fetch_token()
+        hmac_value = create_request_hmac(hmac_secret)
+
+        # Create OpenAI client
+        client = OpenAI(
+            api_key=bearer_token,
+            base_url=self.llm_base_url or "https://api.enterprise.githubcopilot.com",
+            default_headers={
+                "X-Interaction-Type": "conversation-agent",
+                "OpenAI-Intent": "conversation-agent",
+                "X-GitHub-Api-Version": "2025-05-01",
+                "Copilot-Integration-Id": "vscode-chat-dev",
+                "VScode-SessionId": "r2egym-session",
+                "VScode-MachineId": "r2egym-machine",
+                "X-Interaction-Id": str(uuid.uuid4()),
+                "X-Initiator": "agent",
+                "Editor-Version": "r2egym/1.0",
+                "Editor-Plugin-Version": "r2egym/1.0",
+                "Request-Hmac": hmac_value,
+            },
+            timeout=self.llm_timeout,
+        )
+        return client
+
+    def _copilot_claude_api_call(self, model: str, messages: List[Dict[str, str]], 
+                                 tools: Optional[List[Dict]] = None, timeout: int = 60, 
+                                 api_base: Optional[str] = None, **kwargs) -> Any:
+        """
+        Call the GitHub Copilot Claude API using the cached client with retry logic for HMAC timestamp errors.
+        """
+        def retry_warning(retry_state):
+            exception = retry_state.outcome.exception() if retry_state.outcome else None
+            if exception:
+                self.logger.warning(
+                    f"Retrying Copilot Claude query (attempt {retry_state.attempt_number}) due to {exception.__class__.__name__}: {exception}"
+                )
+            # Special handling for HMAC timestamp errors - clear client to force new token
+            if isinstance(exception, openai.AuthenticationError) and "HMAC timestamp out of range" in str(exception):
+                self.logger.info("Refreshing client due to HMAC timestamp error")
+                self._copilot_client = None  # Clear client to force recreation with new HMAC
+
+        # Retry logic for HMAC timestamp errors
+        for attempt in Retrying(
+            stop=stop_after_attempt(20),  # Default retry count from SWE-agent
+            wait=wait_random_exponential(min=10, max=120),  # Default wait times from SWE-agent  
+            reraise=True,
+            retry=retry_if_not_exception_type((
+                # Don't retry these errors
+                KeyboardInterrupt,
+                openai.BadRequestError,
+            )) | retry_if_exception_message(match="HMAC timestamp out of range"),
+            before_sleep=retry_warning,
+        ):
+            with attempt:
+                client = self._get_copilot_client()
+
+                # Build chat request
+                request_kwargs = {
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": 8192,
+                }
+                
+                # Add temperature and top_p for models that support them
+                not_temperature_models = [
+                    "o3-mini-2025-01-31",
+                    "o3-mini-paygo", 
+                    "o3-2025-04-16",
+                    "o4-mini-2025-04-16",
+                ]
+                if model not in not_temperature_models:
+                    if "temperature" in kwargs:
+                        request_kwargs["temperature"] = kwargs["temperature"]
+                    if "top_p" in kwargs:
+                        request_kwargs["top_p"] = kwargs["top_p"]
+                
+                if tools:
+                    request_kwargs["tools"] = tools
+                    request_kwargs["tool_choice"] = "auto"
+
+                # Make the API call
+                response = client.chat.completions.create(**request_kwargs)
+                
+                return response
+
+    def _get_azure_client(self, model: str):
+        """Get or create a cached Azure OpenAI client for the specified model"""
+        # Create a cache key based on the model to handle different models
+        cache_key = f"_azure_client_{model}"
+        if not hasattr(self, cache_key) or getattr(self, cache_key) is None:
+            setattr(self, cache_key, self._create_azure_client(model))
+        return getattr(self, cache_key)
+
+    def _create_azure_client(self, model: str):
+        """Create Azure OpenAI client with proper authentication"""
+        # Model metadata mapping from SWE-agent
+        model_meta = {
+            "gpt-4o": ("2024-11-20", "msrne/shared", "2024-10-21"),
+            "o3": ("2025-04-16", "msrne/shared", "2025-04-01-preview"),
+            "o3-mini": ("2025-01-31", "msrne/shared", "2025-04-01-preview"),
+            "o4-mini": ("2025-04-16", "msrne/shared", "2025-04-01-preview"),
+            "gpt-4.1": ("2025-04-14", "gcr/shared", "2025-04-01-preview"),
+            "gpt-4.5-preview": ("2025-02-27", "msrne/shared", "2025-04-01-preview"),
+            "o1": ("2024-12-17", "msrne/shared", "2025-04-01-preview"),
+            "gpt-4.1-mini": ("2025-04-14", "msrne/shared", "2025-04-01-preview"),
+        }
+        
+        if model not in model_meta:
+            raise ValueError(f"{model} not in supported Azure models {AZURE_SUPPORTED_MODELS}")
+            
+        version, instance, api_version = model_meta[model]
+        deployment_name = re.sub(r"[^a-zA-Z0-9._-]", "", f"{model}_{version}")
+        endpoint = f"https://trapi.research.microsoft.com/{instance}"
+
+        # Set up Azure credentials
+        credential = get_bearer_token_provider(
+            ChainedTokenCredential(
+                AzureCliCredential(),
+                DefaultAzureCredential(
+                    exclude_cli_credential=True,
+                    exclude_environment_credential=True,
+                    exclude_shared_token_cache_credential=True,
+                    exclude_developer_cli_credential=True,
+                    exclude_powershell_credential=True,
+                    exclude_interactive_browser_credential=True,
+                    exclude_visual_studio_code_credentials=True,
+                    managed_identity_client_id=os.environ.get("DEFAULT_IDENTITY_CLIENT_ID"),
+                ),
+            ),
+            "api://trapi/.default",
+        )
+
+        # Create Azure OpenAI client
+        client = AzureOpenAI(
+            azure_endpoint=endpoint,
+            azure_ad_token_provider=credential,
+            api_version=api_version,
+        )
+        
+        # Store deployment name for API calls (using model-specific attribute)
+        setattr(self, f"_azure_deployment_name_{model}", deployment_name)
+        
+        return client
+
+    def _azure_api_call(self, model: str, messages: List[Dict[str, str]], 
+                        tools: Optional[List[Dict]] = None, timeout: int = 60, 
+                        api_base: Optional[str] = None, **kwargs) -> Any:
+        """
+        Call the Azure OpenAI API using the cached client.
+        """
+        client = self._get_azure_client(model)
+
+        # Build Azure request arguments
+        deployment_name = getattr(self, f"_azure_deployment_name_{model}")
+        azure_kwargs = {
+            "model": deployment_name,
+            "messages": messages,
+        }
+        
+        # Models that don't support custom temperature or top_p
+        not_temperature_models = ["o1", "o3", "o3-mini", "o4-mini"]
+        if model not in not_temperature_models:
+            if "temperature" in kwargs:
+                azure_kwargs["temperature"] = kwargs["temperature"]
+            if "top_p" in kwargs:
+                azure_kwargs["top_p"] = kwargs["top_p"]
+        
+        if tools:
+            azure_kwargs["tools"] = tools
+
+        # Make the API call
+        response = client.chat.completions.create(**azure_kwargs)
+        
+        return response
 
     def parse_response(self, response: Dict[str, Any]) -> Tuple[str, Action]:
         """
@@ -319,6 +714,8 @@ class Agent:
         # additional metadata e.g. for hints / additional inputs etc
         metadata: Optional[Dict[str, Any]] = {},
         scaffold: str = "r2egym",
+        # k responses support
+        k_responses: int = 1,
     ):
         assert scaffold in ["r2egym", "openhands", "sweagent"], "Scaffold must be either r2egym or openhands or sweagent"
         self.scaffold = scaffold
@@ -348,7 +745,13 @@ class Agent:
         # Prepare problem_statement and structure from the environment
         problem_statement = env.runtime.get_task_instruction()
         self.logger.info(f"Problem Statement: {problem_statement}")
-        gt_patch = env.runtime.commit.get_patch(test_file=True, non_test_file=False)
+        
+        # Get GT patch - handle different modes (regular, swesmith, 1r1m)
+        if hasattr(env.runtime, 'commit') and env.runtime.commit is not None:
+            gt_patch = env.runtime.commit.get_patch(test_file=True, non_test_file=False)
+        else:
+            # For swesmith or 1r1m mode where commit object doesn't exist
+            gt_patch = ""
 
         # get system and instance prompts
         system_prompt = self.system_prompt_template
@@ -404,7 +807,9 @@ class Agent:
             # Query the LLM
             messages = copy.deepcopy(self.history)
             try:
-                response, llm_exec_time = self.model_query(messages, temperature)
+                responses, llm_exec_time = self.model_query(messages, temperature, k_responses)
+                response = responses[0]  # Use first response for execution
+                alternative_responses = responses[1:] if len(responses) > 1 else None  # Store alternatives
             except Exception as e:
                 self.logger.error(f"Error querying LLM: {e}")
                 self.logger.error(f"Error querying LLM: {traceback.format_exc()}")
@@ -442,8 +847,31 @@ class Agent:
                 thought, action = self.custom_parser(response)
             else:
                 thought, action = self.parse_response(assistant_message)
+            
+            # Parse alternative responses for structured data
+            parsed_alternative_responses = []
+            if alternative_responses:
+                for i, alt_resp in enumerate(alternative_responses):
+                    try:
+                        if self.use_fn_calling:
+                            alt_thought, alt_action = self.custom_parser(alt_resp)
+                        else:
+                            alt_message = alt_resp.choices[0].message.content if hasattr(alt_resp, 'choices') and alt_resp.choices else ""
+                            alt_thought, alt_action = self.parse_response(alt_message)
+                        
+                        parsed_alternative_responses.append({
+                            "thought": alt_thought,
+                            "action": alt_action.to_xml_string()
+                        })
+                    except Exception as e:
+                        self.logger.error(f"Failed to parse alternative response {i+2}: {e}")
+                        parsed_alternative_responses.append({
+                            "thought": "",
+                            "action": "",
+                            "parse_error": str(e)
+                        })
 
-            action_str = action.to_xml_string()
+            # action_str = action.to_xml_string()
             self.logger.info(f"THOUGHT:\n{thought}\n")
             self.logger.info(f"ACTION:\n{action.to_bashcmd()}\n")
 
@@ -557,6 +985,8 @@ class Agent:
                 total_step_time=total_step_time,
                 total_time_traj=total_time_traj,
                 step_count=step_count,
+                # k_responses support - store alternative responses
+                alternative_responses=parsed_alternative_responses if parsed_alternative_responses else None,
             )
             self.trajectory_steps.append(trajectory_step)
 
