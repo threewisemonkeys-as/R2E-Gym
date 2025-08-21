@@ -172,8 +172,6 @@ class DockerRuntime(ExecutionEnvironment):
         self.logger.info("repo name: %s", self.repo_name)
         self.logger.info("Docker image: %s", self.docker_image)
         if self.backend == "docker":
-            if self.container is None: 
-                self.logger("Container is None")
             self.logger.info("Container ID: %s", self.container.id)
         elif self.backend == "kubernetes":
             # Assuming self.container is a V1Pod object after creation/retrieval
@@ -524,11 +522,11 @@ class DockerRuntime(ExecutionEnvironment):
 
         self.run("git apply /bug_patch.diff")
         
-        
         # Check what changes were made
         diff_output, diff_error = self.run("git diff")
         if diff_error != "0":
             self.logger.error(f"Failed to get diff: {diff_output}")
+            raise RuntimeError(f"Failed to apply patch. Git diff returned exit code {diff_error}: {diff_output}")
         else:
             self.logger.info(f"Applied patch resulted in diff:\n{diff_output[:500]}...")  # Log first 500 chars
         print(f"Applied patch resulted in: {diff_output[:500]}")
