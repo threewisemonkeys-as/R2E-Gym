@@ -108,7 +108,7 @@ class DockerRuntime(ExecutionEnvironment):
         self.swebench_verified = "swebench" in self.docker_image
         self.swesmith = "swesmith" in self.docker_image
         if self.swesmith:
-            image_name = self.ds['image_name'].replace('__', '_1776_')
+            image_name = ds_image.replace('__', '_1776_')
             self.swebench_verified = False
             self.docker_image = f'jyangballin/{image_name}:latest'
         
@@ -161,7 +161,6 @@ class DockerRuntime(ExecutionEnvironment):
         self.start_container(
             self.docker_image, command, self.container_name, **docker_kwargs
         )
-        
         
         # Initialize the environment
         self.setup_env()
