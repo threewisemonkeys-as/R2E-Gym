@@ -31,7 +31,7 @@ dependencies = [
     "anthropic[vertex]==0.43.0",
     "litellm>=1.58.2",
     "google-cloud-aiplatform>=1.77.0",
-    "swebench==3.0.2",
+    "swebench==3.0.15",
     "apscheduler>=3.11.0",
     "sb-cli>=0.1.1",
     "seaborn>=0.13.2",
