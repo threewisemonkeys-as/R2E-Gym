@@ -25,6 +25,8 @@ import io
 import os
 from r2egym.agenthub.utils.log import get_logger
 import re
+import threading
+import random
 from r2egym.agenthub.utils.utils import match_dockerimage_to_repo
 from r2egym.agenthub import SUPPORTED_REPOS, SKIP_FILES, SKIP_FILES_NEW, CMD_TIMEOUT
 import concurrent.futures
@@ -72,6 +74,43 @@ from swebench.harness.grading import get_eval_tests_report, get_resolution_statu
 ##############################################################################
 # Docker runtime
 ##############################################################################
+_KUBE_CLIENT_LOCK = threading.Lock()
+_KUBE_API: client.CoreV1Api | None = None
+_KUBE_API_CLIENT: client.ApiClient | None = None
+
+def _get_kube_api():
+    """Return a process-wide cached CoreV1Api (thread-safe).
+
+    Avoids re-running auth plugins (e.g. Azure) concurrently which can cause
+    throttling / intermittent auth failures under high parallelism.
+    """
+    global _KUBE_API, _KUBE_API_CLIENT
+    if _KUBE_API is not None:
+        return _KUBE_API
+    with _KUBE_CLIENT_LOCK:
+        if _KUBE_API is None:  # double-checked
+            # Prefer in-cluster if available; fall back to kubeconfig.
+            try:
+                config.load_incluster_config()
+            except Exception:
+                # Load ONLY once to prevent many parallel exec-plugin calls
+                config.load_kube_config()
+            # Tune pool size: default can be small for many concurrent exec/read ops
+            configuration = client.Configuration.get_default_copy()
+            # Allow overriding via env; default higher than default (which is 10)
+            max_pool = int(os.getenv("R2EGYM_K8S_MAX_POOL", "40"))
+            configuration.max_pool_size = max_pool
+            # Shorter default client-side timeout (can be overridden per call)
+            # configuration.client_side_validation = False  # if needed for perf
+            _KUBE_API_CLIENT = client.ApiClient(configuration=configuration)
+            _KUBE_API = client.CoreV1Api(_KUBE_API_CLIENT)
+    return _KUBE_API
+
+_KUBE_CREATE_SEMAPHORE = threading.Semaphore(
+    int(os.getenv("R2EGYM_K8S_MAX_CREATE_CONCURRENCY", "6"))
+)
+
+
 class DockerRuntime(ExecutionEnvironment):
     """
     docker runtime is responsible for the interacting with the docker environment.
@@ -111,7 +150,7 @@ class DockerRuntime(ExecutionEnvironment):
             image_name = self.ds['image_name'].replace('__', '_1776_')
             self.swebench_verified = False
             self.docker_image = f'jyangballin/{image_name}:latest'
-        
+
         if self.swebench_verified:
             # also create a test spec for swebench verified dockers (useful for grading)
             self.test_spec = make_test_spec(self.ds)
@@ -145,13 +184,8 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "docker":
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
-            # Try in-cluster config first, fallback to kubeconfig
-            # try:
-            #     config.load_incluster_config()
-            # except Exception:
-            #     config.load_kube_config()
-            config.load_kube_config()
-            self.client = client.CoreV1Api()
+            # Reuse singleton client to prevent auth & connection storms
+            self.client = _get_kube_api()
 
         # Start the container
         self.container = None
@@ -159,9 +193,14 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "kubernetes":
             # Generate a random UUID and truncate to 30 characters
             self.container_name = str(uuid.uuid4())
-        self.start_container(
-            self.docker_image, command, self.container_name, **docker_kwargs
-        )
+        # Optional startup jitter to avoid stampeding the API server when many
+        # workers launch simultaneously.
+        if self.backend == "kubernetes":
+            max_jitter = float(os.getenv("R2EGYM_K8S_STARTUP_JITTER", "2.5"))
+            if max_jitter > 0:
+                time.sleep(random.random() * max_jitter)
+
+        self.start_container(self.docker_image, command, self.container_name, **docker_kwargs)
 
         # Initialize the environment
         self.setup_env()
@@ -199,20 +238,29 @@ class DockerRuntime(ExecutionEnvironment):
         or raise RuntimeError after *timeout* seconds.
         """
         start = time.time()
+        backoff = 1.0
         while True:
-            pod = self.client.read_namespaced_pod(
-                name=self.container_name,
-                namespace=DEFAULT_NAMESPACE,
-                _request_timeout=20,
-            )
-            st = pod.status.container_statuses or []
-            if st and all(c.ready for c in st):
-                return
+            try:
+                pod = self.client.read_namespaced_pod(
+                    name=self.container_name,
+                    namespace=DEFAULT_NAMESPACE,
+                    _request_timeout=15,
+                )
+                st = pod.status.container_statuses or []
+                if st and all(c.ready for c in st):
+                    return
+            except Exception as e:
+                # Transient read error; log at debug level if logger available
+                try:
+                    self.logger.debug(f"read_namespaced_pod retry: {e}")
+                except Exception:
+                    pass
             if time.time() - start > timeout:
                 raise RuntimeError(
                     f"Pod '{self.container_name}' did not become Ready within {timeout}s"
                 )
-            time.sleep(1)
+            time.sleep(backoff)
+            backoff = min(backoff * 1.3, 5)
 
     def _start_kubernetes_pod(
         self, docker_image: str, command: str, pod_name: str, **docker_kwargs
@@ -307,25 +355,36 @@ class DockerRuntime(ExecutionEnvironment):
         backoff = 5  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
+            acquired = _KUBE_CREATE_SEMAPHORE.acquire(timeout=300)
+            if not acquired:
+                raise RuntimeError("Timeout acquiring K8s create semaphore")
             try:
-                pod = self.client.create_namespaced_pod(
-                    namespace=DEFAULT_NAMESPACE, body=pod_body, _request_timeout=120,
-                )
-                break  # success
-            except client.ApiException as e:
-                # Retry on API-server throttling or transient errors
-                if e.status in (409, 429, 500, 503):
-                    self.logger.warning(
-                        f"Transient Kubernetes error {e.status} while creating pod "
-                        f"'{pod_name}' (attempt {attempt}/{max_retries}); "
-                        f"retrying in {backoff}s"
+                try:
+                    pod = self.client.create_namespaced_pod(
+                        namespace=DEFAULT_NAMESPACE,
+                        body=pod_body,
+                        _request_timeout=120,
                     )
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
-                    continue
-                # Non-retryable error → propagate
-                self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
-                raise
+                    break  # success
+                except client.ApiException as e:
+                    # Retry on API-server throttling or transient errors
+                    if e.status in (409, 429, 500, 503):
+                        jitter = random.uniform(0, 1.5)
+                        self.logger.warning(
+                            f"Transient Kubernetes error {e.status} while creating pod "
+                            f"'{pod_name}' (attempt {attempt}/{max_retries}); "
+                            f"retrying in {backoff + jitter:.2f}s"
+                        )
+                        time.sleep(backoff + jitter)
+                        backoff = min(backoff * 2, 60)
+                        continue
+                    # Non-retryable error → propagate
+                    self.logger.error(
+                        f"Failed to create Kubernetes pod '{pod_name}': {e}"
+                    )
+                    raise
+            finally:
+                _KUBE_CREATE_SEMAPHORE.release()
         else:
             raise RuntimeError(
                 f"Exceeded retry limit ({max_retries}) while creating pod '{pod_name}'."
@@ -440,7 +499,7 @@ class DockerRuntime(ExecutionEnvironment):
                     deletion_confirmed = True
                     w.stop()
                     break
-            
+
             # If watch times out without seeing deletion, verify pod is gone
             if not deletion_confirmed:
                 try:
@@ -490,12 +549,12 @@ class DockerRuntime(ExecutionEnvironment):
                     self._stop_kubernetes_pod()
         except Exception as e:
             print("Container stop/delete error:", repr(e))
-    
+
     def reset_swesmith_tests(self):
         f2p_files = list(set([x.split("::", 1)[0] for x in self.ds[FAIL_TO_PASS]]))
         p2p_files = list(set([x.split("::", 1)[0] for x in self.ds[PASS_TO_PASS]]))
         all_files = list(set(f2p_files + p2p_files))
-        all_files = [f for f in all_files if 
+        all_files = [f for f in all_files if
              os.path.basename(f).startswith('test_') and os.path.basename(f).endswith('.py') or
              os.path.basename(f).endswith('_test.py')]
         commit_id = self.ds['base_commit']
@@ -510,7 +569,7 @@ class DockerRuntime(ExecutionEnvironment):
             commit_id = self.ds['base_commit']
             self.run("git fetch")
             self.run(f"git checkout {commit_id}")
-            # Setup the run_test.sh script for subsequent testing.  
+            # Setup the run_test.sh script for subsequent testing.
             test_command, _ = get_test_command(self.ds)
             eval_script_content = "\n".join(
                 [
@@ -524,16 +583,16 @@ class DockerRuntime(ExecutionEnvironment):
                     f": '>>>>> End Test Output'",
                 ]
             ) + "\n"
-            
+
             with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
                 temp_file.write(eval_script_content)
                 temp_file.flush()  # Ensure content is written to disk
                 temp_file_path = temp_file.name
-            
+
             # Copy the file to container and clean up
             self.copy_to_container(temp_file_path, "/run_tests.sh")
             os.unlink(temp_file_path)  # Clean up the temporary file
-            
+
             self.run("chmod +x /run_tests.sh")
 
             # Ensure can call and execute the tools in /usr/local/bin.
@@ -1006,18 +1065,18 @@ class DockerRuntime(ExecutionEnvironment):
             return parsed_output
         else:
             return parse_log_fn(f"{self.repo_name}")(log_output)
-    
+
     def _calculate_reward_swesmith(self, get_test_output=False, timeout: int = 300) -> float:
         self.reset_swesmith_tests()
         output, error_msg = self.run("/run_tests.sh", timeout=timeout)
         parse = self.parse_logs(output)
-        
+
         fail2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['FAIL_TO_PASS']]
         pass2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['PASS_TO_PASS']]
         # @(Naman, Jas): Parse the output and return the reward. This implementation is a hack rn.
         if not parse:
             return 0.0
-        
+
         # Check fail2pass
         for test_name in fail2pass:
             if test_name not in parse:
@@ -1030,7 +1089,7 @@ class DockerRuntime(ExecutionEnvironment):
                 test_name = matching_key
             if parse[test_name] != 'PASSED':
                 return 0.0
-        
+
         # Check pass2pass
         for test_name in pass2pass:
             if test_name not in parse:
