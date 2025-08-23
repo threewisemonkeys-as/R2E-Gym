@@ -527,7 +527,36 @@ class Agent:
                 # Make the API call
                 response = client.chat.completions.create(**request_kwargs)
                 
-                return response
+                if "claude" in model:
+                    # claude has different output format, which instead of having content and tool_calls in the same message, it has two messages. 
+                    # So we need to merge the two into a single message
+                    # An example claude result is:
+                    # {'choices': [{'finish_reason': 'tool_calls', 'message': {'content': 'I\'ll help you get the weather information for Paris. Let me think through this step by step:\n\n**My reasoning:**\n1. The user is asking for weather information for a specific location: Paris\n2. I have access to a `get_weather` function that can retrieve current weather data\n3. The function requires one parameter: `location` (a city or state)\n4. The user specified "Paris" as the location\n5. I have all the required parameters to make the function call\n\n**Tool call:**\nI\'ll now call the weather function with Paris as the location parameter.', 'role': 'assistant'}}, {'finish_reason': 'tool_calls', 'message': {'role': 'assistant', 'tool_calls': [{'function': {'arguments': '{"location":"Paris"}', 'name': 'get_weather'}, 'id': 'toolu_01Y1LA8ADYh9LEH9fZf55gmY', 'type': 'function'}]}}], 'created': 1755986605, 'id': 'msg_01HLV6JJXuHhZ24TSbViTSvd', 'usage': {'completion_tokens': 179, 'prompt_tokens': 418, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 597}, 'model': 'claude-sonnet-4'}
+                    if len(response['choices']) > 1:
+                        # Merge Claude's multi-message response into a single message
+                        merged_message = {
+                            'role': 'assistant',
+                            'content': response['choices'][0]['message'].get('content', ''),
+                            'tool_calls': []
+                        }
+                        
+                        # Collect tool_calls from all choice messages
+                        for choice in response['choices']:
+                            if 'tool_calls' in choice['message']:
+                                merged_message['tool_calls'].extend(choice['message']['tool_calls'])
+                        
+                        # If no tool_calls were found, remove the empty list
+                        if not merged_message['tool_calls']:
+                            del merged_message['tool_calls']
+                        
+                        # Update the result to have a single choice with merged message
+                        response['choices'] = [{
+                            'finish_reason': response['choices'][-1]['finish_reason'],
+                            'message': merged_message
+                        }]
+                litellm_response = litellm.types.utils.ModelResponse(**response)
+
+                return litellm_response
 
     def _get_azure_client(self, model: str):
         """Get or create a cached Azure OpenAI client for the specified model"""
@@ -616,8 +645,9 @@ class Agent:
 
         # Make the API call
         response = client.chat.completions.create(**azure_kwargs)
-        
-        return response
+        litellm_response = litellm.types.utils.ModelResponse(**response)
+
+        return litellm_response
 
     def parse_response(self, response: Dict[str, Any]) -> Tuple[str, Action]:
         """
