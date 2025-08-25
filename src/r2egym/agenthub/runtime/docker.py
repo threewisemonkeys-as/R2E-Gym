@@ -264,6 +264,18 @@ class DockerRuntime(ExecutionEnvironment):
                         "operator": "Exists",
                         "effect": "NoExecute",
                         "tolerationSeconds": 10800
+                    },
+                    {
+                        "key": "kubernetes.azure.com/scalesetpriority",
+                        "operator": "Equal",
+                        "value": "spot",
+                        "effect": "NoSchedule"
+                    },
+                    {
+                        "key": "CriticalAddonsOnly",
+                        "operator": "Equal",
+                        "value": "true",
+                        "effect": "NoSchedule"
                     }
                 ],
             },
