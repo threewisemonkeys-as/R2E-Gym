@@ -241,6 +241,8 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
+                "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
+                "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
                     {
@@ -252,12 +254,11 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "1", "memory": "1Gi"},
+                            "requests": {"cpu": "250m", "memory": "250Mi"},
                         },
                     }
                 ],
                 "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
@@ -273,10 +274,8 @@ class DockerRuntime(ExecutionEnvironment):
                     },
                     {
                         "key": "CriticalAddonsOnly",
-                        "operator": "Equal",
-                        "value": "true",
-                        "effect": "NoSchedule"
-                    }
+                        "operator": "Exists"
+                    },
                 ],
             },
         }
