@@ -201,6 +201,7 @@ def runagent(
     max_iterations: int = 1,
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
+    step_timeout: int = 90,
 ) -> Optional[str]:
     """
     Runs the editagent agent on a specified Docker image.
@@ -230,7 +231,7 @@ def runagent(
     env_args = EnvArgs(ds=ds)
 
     # Initialize the RepoEnv
-    env = RepoEnv(env_args, logger=logger, backend=backend)
+    env = RepoEnv(env_args, logger=logger, backend=backend, step_timeout=step_timeout)
     # set agent args
     if use_fn_calling:
         assert scaffold != "sweagent", "SWEagent scaffold does not support fn calling"
@@ -309,6 +310,7 @@ def runagent_multiple(
     scaffold: str = "r2egym",
     prepull_images: bool = False,
     max_tokens: int = 65536,
+    step_timeout: int = 180,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -418,6 +420,7 @@ def runagent_multiple(
                 max_iterations=max_iterations,
                 scaffold=scaffold,
                 max_tokens=max_tokens,
+                step_timeout=step_timeout,
             ): ds_entry["docker_image"] if "docker_image" in ds_entry else ds_entry["image_name"]
             for ds_entry in ds_selected
         }
