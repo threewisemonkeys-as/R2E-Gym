@@ -625,34 +625,61 @@ class Agent:
                         tools: Optional[List[Dict]] = None, timeout: int = 60, 
                         api_base: Optional[str] = None, **kwargs) -> Any:
         """
-        Call the Azure OpenAI API using the cached client.
+        Call the Azure OpenAI API using the cached client with retry logic.
         """
-        client = self._get_azure_client(model)
+        def retry_warning(retry_state):
+            exception = retry_state.outcome.exception() if retry_state.outcome else None
+            if exception:
+                self.logger.warning(
+                    f"Retrying Azure API query (attempt {retry_state.attempt_number}) due to {exception.__class__.__name__}: {exception}"
+                )
+            # Special handling for authentication errors - clear client to force recreation
+            if isinstance(exception, (openai.AuthenticationError, openai.PermissionDeniedError)):
+                self.logger.info("Refreshing Azure client due to authentication error")
+                # Clear the model-specific client to force recreation
+                cache_key = f"_azure_client_{model}"
+                if hasattr(self, cache_key):
+                    setattr(self, cache_key, None)
 
-        # Build Azure request arguments
-        deployment_name = getattr(self, f"_azure_deployment_name_{model}")
-        azure_kwargs = {
-            "model": deployment_name,
-            "messages": messages,
-        }
-        
-        # Models that don't support custom temperature or top_p
-        not_temperature_models = ["o1", "o3", "o3-mini", "o4-mini"]
-        if model not in not_temperature_models:
-            if "temperature" in kwargs:
-                azure_kwargs["temperature"] = kwargs["temperature"]
-            if "top_p" in kwargs:
-                azure_kwargs["top_p"] = kwargs["top_p"]
-        
-        if tools:
-            azure_kwargs["tools"] = tools
+        # Retry logic for Azure API errors
+        for attempt in Retrying(
+            stop=stop_after_attempt(20),  # Default retry count from SWE-agent
+            wait=wait_random_exponential(min=10, max=120),  # Default wait times from SWE-agent  
+            reraise=True,
+            retry=retry_if_not_exception_type((
+                # Don't retry these errors
+                KeyboardInterrupt,
+                openai.BadRequestError,
+            )),
+            before_sleep=retry_warning,
+        ):
+            with attempt:
+                client = self._get_azure_client(model)
 
-        # Make the API call
-        response = client.chat.completions.create(**azure_kwargs)
+                # Build Azure request arguments
+                deployment_name = getattr(self, f"_azure_deployment_name_{model}")
+                azure_kwargs = {
+                    "model": deployment_name,
+                    "messages": messages,
+                }
+                
+                # Models that don't support custom temperature or top_p
+                not_temperature_models = ["o1", "o3", "o3-mini", "o4-mini"]
+                if model not in not_temperature_models:
+                    if "temperature" in kwargs:
+                        azure_kwargs["temperature"] = kwargs["temperature"]
+                    if "top_p" in kwargs:
+                        azure_kwargs["top_p"] = kwargs["top_p"]
+                
+                if tools:
+                    azure_kwargs["tools"] = tools
 
-        # Convert ChatCompletion to dict before creating litellm ModelResponse
-        litellm_response = litellm.types.utils.ModelResponse(**response.model_dump())
-        return litellm_response
+                # Make the API call
+                response = client.chat.completions.create(**azure_kwargs)
+
+                # Convert ChatCompletion to dict before creating litellm ModelResponse
+                litellm_response = litellm.types.utils.ModelResponse(**response.model_dump())
+                return litellm_response
 
     def parse_response(self, response: Dict[str, Any]) -> Tuple[str, Action]:
         """
