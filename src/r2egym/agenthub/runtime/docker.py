@@ -1,3 +1,4 @@
+import random
 import os, sys
 import json
 from time import sleep
@@ -240,6 +241,8 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
+                "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
+                "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
                     {
@@ -251,26 +254,35 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "1", "memory": "1Gi"},
+                            "requests": {"cpu": "250m", "memory": "250Mi"},
                         },
                     }
                 ],
                 "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
                         "operator": "Exists",
                         "effect": "NoExecute",
                         "tolerationSeconds": 10800
-                    }
+                    },
+                    {
+                        "key": "kubernetes.azure.com/scalesetpriority",
+                        "operator": "Equal",
+                        "value": "spot",
+                        "effect": "NoSchedule"
+                    },
+                    {
+                        "key": "CriticalAddonsOnly",
+                        "operator": "Exists"
+                    },
                 ],
             },
         }
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
-        max_retries = 5
-        backoff = 5  # seconds
+        max_retries = 20
+        backoff = random.uniform(5, 10)  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -287,7 +299,7 @@ class DockerRuntime(ExecutionEnvironment):
                         f"retrying in {backoff}s"
                     )
                     time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    backoff = backoff * 2
                     continue
                 # Non-retryable error → propagate
                 self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
@@ -861,8 +873,8 @@ class DockerRuntime(ExecutionEnvironment):
         tar_stream.seek(0)
 
         # Retry with exponential backoff
-        max_retries = 5
-        retry_delay = 5  # Initial delay in seconds
+        max_retries = 20
+        retry_delay = random.uniform(5, 10)  # Random initial delay between 5 and 10 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
@@ -887,7 +899,6 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.warning(f"Copy to container failed (attempt {attempt+1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
-                    retry_delay = min(retry_delay, 60)
                     tar_stream.seek(0)  # Reset the stream for the next attempt
                 else:
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
@@ -1087,7 +1098,7 @@ class DockerRuntime(ExecutionEnvironment):
         eval_type = EvalType.FAIL_ONLY if self.test_spec.repo in FAIL_ONLY_REPOS \
             else EvalType.PASS_AND_FAIL
         report = get_eval_tests_report(
-            eval_status_map, eval_ref, eval_type=eval_type
+            eval_status_map, eval_ref, eval_type=eval_type(self.test_spec)
         )
         success = get_resolution_status(report) == ResolvedStatus.FULL.value
         if get_test_output:
