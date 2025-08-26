@@ -1055,32 +1055,43 @@ class DockerRuntime(ExecutionEnvironment):
         pass2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['PASS_TO_PASS']]
         # @(Naman, Jas): Parse the output and return the reward. This implementation is a hack rn.
         if not parse:
-            return 0.0
+            reward = 0.0
+        else:
+            reward = 1.0
+            # Check fail2pass
+            for test_name in fail2pass:
+                if test_name not in parse:
+                    # Check if test_name is substring of any key
+                    matching_key = next((k for k in parse.keys() if test_name in k), None)
+                    if matching_key is None:
+                        reward = 0.0
+                        break
+                    if parse[matching_key] != 'PASSED':
+                        reward = 0.0
+                        break
+                    test_name = matching_key
+                if parse[test_name] != 'PASSED':
+                    reward = 0.0
+                    break
+            
+            # Check pass2pass only if fail2pass tests passed
+            if reward == 1.0:
+                for test_name in pass2pass:
+                    if test_name not in parse:
+                        # Check if test_name is substring of any key
+                        matching_key = next((k for k in parse.keys() if test_name in k), None)
+                        if matching_key is None:
+                            reward = 0.0
+                            break
+                        test_name = matching_key
+                    if parse[test_name] != 'PASSED':
+                        reward = 0.0
+                        break
         
-        # Check fail2pass
-        for test_name in fail2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                if parse[matching_key] != 'PASSED':
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        
-        # Check pass2pass
-        for test_name in pass2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        return 1.0
+        # If the caller wants the test output as well, return (reward, output)
+        if get_test_output:
+            return reward, output
+        return reward
 
 
     def _calculate_reward_swebench(self, get_test_output=False, timeout: int = 300) -> float:
