@@ -695,19 +695,25 @@ class DockerRuntime(ExecutionEnvironment):
 
             self.run("find . -name '__pycache__' -exec rm -rf {} +")
 
-            # also delete pycache and pyc from /r2e_tests
-            self.run("find /r2e_tests -name '*.pyc' -delete")
-            self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
+            # also delete pycache and pyc from /r2e_tests (if it exists)
+            test_dir_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in test_dir_check:
+                self.run("find /r2e_tests -name '*.pyc' -delete")
+                self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
 
             # move all skip files (if present) to /root
             for skip_file in SKIP_FILES_NEW:
-                self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
+                # Check if skip file exists before trying to move it
+                skip_file_check, _ = self.run(f"test -f {self.repo_path}/{skip_file} && echo 'exists' || echo 'not found'")
+                if "exists" in skip_file_check:
+                    self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
 
-            # r2e_tests are in the / directory, move them to /root
-            self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
-
-            # make a softlink for /root/r2e_tests (if present)
-            self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
+            # r2e_tests are in the / directory, move them to /root (if they exist)
+            r2e_tests_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in r2e_tests_check:
+                self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
+                # make a softlink for /root/r2e_tests
+                self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
             # self.run(f"ln -s /r2e_tests {self.repo_path}/r2e_tests")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
