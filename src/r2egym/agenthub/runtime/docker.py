@@ -476,11 +476,58 @@ class DockerRuntime(ExecutionEnvironment):
              os.path.basename(f).startswith('test_') and os.path.basename(f).endswith('.py') or
              os.path.basename(f).endswith('_test.py')]
         commit_id = self.ds['base_commit']
-        reset_command = (
-            f'printf "%s\\n" {" ".join(all_files)} | '
-            f'xargs -n1 -I{{}} git checkout {commit_id} -- "{{}}" 2>/dev/null'
-        )
-        self.run(reset_command)
+        
+        if not all_files:
+            self.logger.info("No test files to reset")
+            return
+            
+        self.logger.info(f"Resetting {len(all_files)} test files to commit {commit_id}")
+        
+        # Use a simpler approach that works with /bin/sh
+        # Reset each file individually with proper error handling
+        files_reset = 0
+        files_skipped = 0
+        
+        for file_path in all_files:
+            import shlex
+            escaped_file = shlex.quote(file_path)
+            escaped_commit = shlex.quote(commit_id)
+            
+            # Check if file exists in the commit first
+            check_command = f'git ls-tree {escaped_commit} -- {escaped_file}'
+            check_result = self.run(check_command)
+            
+            # Ensure we got a valid result from self.run()
+            if check_result is None:
+                self.logger.warning(f"Failed to check if {file_path} exists in commit {commit_id}")
+                files_skipped += 1
+                continue
+                
+            check_output, check_error = check_result
+            
+            # If git ls-tree returned successfully and has output, the file exists
+            if check_error == "0" and check_output.strip():
+                reset_command = f'git checkout {escaped_commit} -- {escaped_file}'
+                reset_result = self.run(reset_command)
+                
+                if reset_result is None:
+                    self.logger.warning(f"Failed to reset {file_path}")
+                    files_skipped += 1
+                    continue
+                    
+                reset_output, reset_error = reset_result
+                
+                if reset_error == "0":
+                    self.logger.debug(f"Reset {file_path} to commit {commit_id}")
+                    files_reset += 1
+                else:
+                    self.logger.debug(f"Could not reset {file_path}: {reset_output}")
+                    files_skipped += 1
+            else:
+                self.logger.debug(f"File {file_path} not found in commit {commit_id}, skipping")
+                files_skipped += 1
+                
+        self.logger.info(f"Test files reset completed: {files_reset} reset, {files_skipped} skipped")
 
     def setup_env_swesmith(self):
         try:
@@ -648,19 +695,25 @@ class DockerRuntime(ExecutionEnvironment):
 
             self.run("find . -name '__pycache__' -exec rm -rf {} +")
 
-            # also delete pycache and pyc from /r2e_tests
-            self.run("find /r2e_tests -name '*.pyc' -delete")
-            self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
+            # also delete pycache and pyc from /r2e_tests (if it exists)
+            test_dir_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in test_dir_check:
+                self.run("find /r2e_tests -name '*.pyc' -delete")
+                self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
 
             # move all skip files (if present) to /root
             for skip_file in SKIP_FILES_NEW:
-                self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
+                # Check if skip file exists before trying to move it
+                skip_file_check, _ = self.run(f"test -f {self.repo_path}/{skip_file} && echo 'exists' || echo 'not found'")
+                if "exists" in skip_file_check:
+                    self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
 
-            # r2e_tests are in the / directory, move them to /root
-            self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
-
-            # make a softlink for /root/r2e_tests (if present)
-            self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
+            # r2e_tests are in the / directory, move them to /root (if they exist)
+            r2e_tests_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in r2e_tests_check:
+                self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
+                # make a softlink for /root/r2e_tests
+                self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
             # self.run(f"ln -s /r2e_tests {self.repo_path}/r2e_tests")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
