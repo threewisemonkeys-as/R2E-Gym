@@ -281,6 +281,11 @@ def runagent(
     trajectory.ds = ds
     trajectory.exp_name = exp_name
     trajectory.reward_calc_time = reward_calc_time # time taken to calculate reward
+    
+    # Ensure problem_statement is set from dataset if it's None or empty
+    if not hasattr(trajectory, 'problem_statement') or trajectory.problem_statement is None or trajectory.problem_statement == "":
+        trajectory.problem_statement = ds.get("problem_statement", "No problem statement available")
+    
     logger.warning(f"time taken to calculate reward in seconds: {reward_calc_time:.2f}")
 
     logger.info(f"editagent completed for Docker image: {ds['docker_image']}")
@@ -344,6 +349,9 @@ def runagent_multiple(
     logger.info(
         f"Dataset: {dataset}, Split: {split}, Num_total: {len(ds)}, Start Index: {start_idx}, k: {k}"
     )
+    logger.info(f"Selected {len(ds_selected)} entries from dataset")
+    unique_docker_images = len(set([ds_entry["docker_image"] for ds_entry in ds_selected]))
+    logger.info(f"Unique docker images in selection: {unique_docker_images}")
     logger.info(f"Starting editagent on {len(ds_selected)} Docker images.")
 
     # Generate a unique experiment name if not provided
