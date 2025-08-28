@@ -27,6 +27,7 @@ from r2egym.agenthub import SUPPORTED_REPOS
 from datasets import load_dataset
 from r2egym.agenthub.trajectory import TrajectoryStep, Trajectory
 import time
+import random
 
 ##############################################################################
 # Initialize Logger
@@ -335,8 +336,10 @@ def runagent_multiple(
     else:
         ds = load_dataset(dataset, split=split)
     logger.info(f"{len(ds)}, {k}, {start_idx}")
-    # shuffle the dataset
-    ds = ds.shuffle(seed=42)
+    # shuffle the dataset with time-based seed for true randomization
+    time_seed = int(time.time())
+    logger.info(f"Using time-based seed for shuffling: {time_seed}")
+    ds = ds.shuffle(seed=time_seed)
 
     # get selected idxs
     selected_idx = range(start_idx, start_idx + k)
