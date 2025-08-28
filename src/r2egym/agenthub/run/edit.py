@@ -27,6 +27,7 @@ from r2egym.agenthub import SUPPORTED_REPOS
 from datasets import load_dataset
 from r2egym.agenthub.trajectory import TrajectoryStep, Trajectory
 import time
+import random
 
 ##############################################################################
 # Initialize Logger
@@ -330,8 +331,10 @@ def runagent_multiple(
     else:
         ds = load_dataset(dataset, split=split)
     logger.info(f"{len(ds)}, {k}, {start_idx}")
-    # shuffle the dataset
-    ds = ds.shuffle(seed=42)
+    # shuffle the dataset with time-based seed for true randomization
+    time_seed = int(time.time())
+    logger.info(f"Using time-based seed for shuffling: {time_seed}")
+    ds = ds.shuffle(seed=time_seed)
 
     # get selected idxs
     selected_idx = range(start_idx, start_idx + k)
@@ -357,38 +360,40 @@ def runagent_multiple(
     if use_existing:
         if jsonl_file.exists():
             with open(jsonl_file) as f:
-                existing_dockers = []
+                existing_instance_ids = []
                 for line in f.readlines():
                     try:
-                        existing_dockers.append(
-                            Trajectory.load_from_model_dump_json(line).ds[
-                                "docker_image"
-                            ]
-                        )
+                        trajectory_data = Trajectory.load_from_model_dump_json(line)
+                        instance_id = trajectory_data.ds.get("instance_id")
+                        if instance_id:
+                            existing_instance_ids.append(instance_id)
                     except:
                         print("error in jsonl file")
 
+            logger.info(f"Found {len(existing_instance_ids)} existing trajectories")
+            logger.info(f"Unique existing instance IDs: {len(set(existing_instance_ids))}")
+            
             ds_selected = [
                 ds_entry
                 for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
+                if ds_entry.get("instance_id") not in existing_instance_ids
             ]
 
     if skip_existing:
         old_jsonl_files_glob = f"{exp_name[:-1]}*"
         for old_jsonl_file in traj_dir_path.glob(old_jsonl_files_glob):
             with open(old_jsonl_file) as f:
-                existing_dockers = [
-                    loadline["ds"]["docker_image"]
+                existing_instance_ids = [
+                    loadline["ds"]["instance_id"]
                     for line in f
                     for loadline in [json.loads(line)]
-                    if loadline["reward"] == 1
+                    if loadline["reward"] == 1 and "instance_id" in loadline["ds"]
                 ]
 
             ds_selected = [
                 ds_entry
                 for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
+                if ds_entry.get("instance_id") not in existing_instance_ids
             ]
 
     logger.info(
