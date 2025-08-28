@@ -201,6 +201,7 @@ def runagent(
     max_iterations: int = 1,
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
+    step_timeout: int = 90,
 ) -> Optional[str]:
     """
     Runs the editagent agent on a specified Docker image.
@@ -230,7 +231,7 @@ def runagent(
     env_args = EnvArgs(ds=ds)
 
     # Initialize the RepoEnv
-    env = RepoEnv(env_args, logger=logger, backend=backend)
+    env = RepoEnv(env_args, logger=logger, backend=backend, step_timeout=step_timeout)
     # set agent args
     if use_fn_calling:
         assert scaffold != "sweagent", "SWEagent scaffold does not support fn calling"
@@ -279,6 +280,11 @@ def runagent(
     trajectory.ds = ds
     trajectory.exp_name = exp_name
     trajectory.reward_calc_time = reward_calc_time # time taken to calculate reward
+    
+    # Ensure problem_statement is set from dataset if it's None or empty
+    if not hasattr(trajectory, 'problem_statement') or trajectory.problem_statement is None or trajectory.problem_statement == "":
+        trajectory.problem_statement = ds.get("problem_statement", "No problem statement available")
+    
     logger.warning(f"time taken to calculate reward in seconds: {reward_calc_time:.2f}")
 
     logger.info(f"editagent completed for Docker image: {ds['docker_image']}")
@@ -309,6 +315,7 @@ def runagent_multiple(
     scaffold: str = "r2egym",
     prepull_images: bool = False,
     max_tokens: int = 65536,
+    step_timeout: int = 180,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -355,38 +362,40 @@ def runagent_multiple(
     if use_existing:
         if jsonl_file.exists():
             with open(jsonl_file) as f:
-                existing_dockers = []
+                existing_instance_ids = []
                 for line in f.readlines():
                     try:
-                        existing_dockers.append(
-                            Trajectory.load_from_model_dump_json(line).ds[
-                                "docker_image"
-                            ]
-                        )
+                        trajectory_data = Trajectory.load_from_model_dump_json(line)
+                        instance_id = trajectory_data.ds.get("instance_id")
+                        if instance_id:
+                            existing_instance_ids.append(instance_id)
                     except:
                         print("error in jsonl file")
 
+            logger.info(f"Found {len(existing_instance_ids)} existing trajectories")
+            logger.info(f"Unique existing instance IDs: {len(set(existing_instance_ids))}")
+            
             ds_selected = [
                 ds_entry
                 for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
+                if ds_entry.get("instance_id") not in existing_instance_ids
             ]
 
     if skip_existing:
         old_jsonl_files_glob = f"{exp_name[:-1]}*"
         for old_jsonl_file in traj_dir_path.glob(old_jsonl_files_glob):
             with open(old_jsonl_file) as f:
-                existing_dockers = [
-                    loadline["ds"]["docker_image"]
+                existing_instance_ids = [
+                    loadline["ds"]["instance_id"]
                     for line in f
                     for loadline in [json.loads(line)]
-                    if loadline["reward"] == 1
+                    if loadline["reward"] == 1 and "instance_id" in loadline["ds"]
                 ]
 
             ds_selected = [
                 ds_entry
                 for ds_entry in ds_selected
-                if ds_entry["docker_image"] not in existing_dockers
+                if ds_entry.get("instance_id") not in existing_instance_ids
             ]
 
     logger.info(
@@ -418,9 +427,8 @@ def runagent_multiple(
                 max_iterations=max_iterations,
                 scaffold=scaffold,
                 max_tokens=max_tokens,
-            ): ds_entry[
-                "docker_image"
-            ]  # <-- store the docker_image from ds_entry here
+                step_timeout=step_timeout,
+            ): ds_entry["docker_image"] if "docker_image" in ds_entry else ds_entry["image_name"]
             for ds_entry in ds_selected
         }
 
