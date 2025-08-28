@@ -281,7 +281,7 @@ class DockerRuntime(ExecutionEnvironment):
         }
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
-        max_retries = 20
+        max_retries = 50
         backoff = random.uniform(5, 10)  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
@@ -299,7 +299,7 @@ class DockerRuntime(ExecutionEnvironment):
                         f"retrying in {backoff}s"
                     )
                     time.sleep(backoff)
-                    backoff = backoff * 2
+                    backoff = min(backoff * 2, 240)
                     continue
                 # Non-retryable error → propagate
                 self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
@@ -926,8 +926,8 @@ class DockerRuntime(ExecutionEnvironment):
         tar_stream.seek(0)
 
         # Retry with exponential backoff
-        max_retries = 20
-        retry_delay = random.uniform(5, 10)  # Random initial delay between 5 and 10 seconds
+        max_retries = 50
+        retry_delay = random.uniform(1, 10)  # Random initial delay between 5 and 10 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
@@ -952,6 +952,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.warning(f"Copy to container failed (attempt {attempt+1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
+                    retry_delay = min(retry_delay, 240)
                     tar_stream.seek(0)  # Reset the stream for the next attempt
                 else:
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
