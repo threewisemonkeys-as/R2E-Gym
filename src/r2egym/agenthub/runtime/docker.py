@@ -927,7 +927,7 @@ class DockerRuntime(ExecutionEnvironment):
 
         # Retry with exponential backoff
         max_retries = 50
-        retry_delay = random.uniform(1, 10)  # Random initial delay between 5 and 10 seconds
+        retry_delay = random.uniform(1, 30)  # Random initial delay between 1 and 30 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
