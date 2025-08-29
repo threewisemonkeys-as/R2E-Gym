@@ -59,7 +59,8 @@ AZURE_SUPPORTED_MODELS = [
     "gpt-4.1",
     "gpt-4.5-preview",
     "o1",
-    "gpt-4.1-mini"
+    "gpt-4.1-mini",
+    "gpt-5"
 ]
 
 # CopilotClaudeModel supported models from SWE-agent
