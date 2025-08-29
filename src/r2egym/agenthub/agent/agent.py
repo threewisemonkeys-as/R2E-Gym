@@ -666,7 +666,7 @@ class Agent:
                 }
                 
                 # Models that don't support custom temperature or top_p
-                not_temperature_models = ["o1", "o3", "o3-mini", "o4-mini"]
+                not_temperature_models = ["o1", "o3", "o3-mini", "o4-mini", "gpt-5"]
                 if model not in not_temperature_models:
                     if "temperature" in kwargs:
                         azure_kwargs["temperature"] = kwargs["temperature"]
