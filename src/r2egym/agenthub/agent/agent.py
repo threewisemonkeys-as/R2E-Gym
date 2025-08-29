@@ -582,6 +582,7 @@ class Agent:
             "gpt-4.5-preview": ("2025-02-27", "msrne/shared", "2025-04-01-preview"),
             "o1": ("2024-12-17", "msrne/shared", "2025-04-01-preview"),
             "gpt-4.1-mini": ("2025-04-14", "msrne/shared", "2025-04-01-preview"),
+            "gpt-5": ("2025-08-07", "msrne/shared", "2024-12-01-preview"),
         }
         
         if model not in model_meta:
