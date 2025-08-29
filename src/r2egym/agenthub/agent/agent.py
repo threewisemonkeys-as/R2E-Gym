@@ -90,6 +90,7 @@ COPILOT_CLAUDE_SUPPORTED_MODELS = [
     "gpt-4.1-nano-2025-04-14",
     "oswe-vscode",
     "gpt-4.1-oswe-control",
+    "gpt-5",
 ]
 
 ##############################################################################
@@ -514,6 +515,7 @@ class Agent:
                     "o3-mini-paygo", 
                     "o3-2025-04-16",
                     "o4-mini-2025-04-16",
+                    "gpt-5",
                 ]
                 if model not in not_temperature_models:
                     if "temperature" in kwargs:
