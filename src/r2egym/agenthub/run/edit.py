@@ -11,6 +11,7 @@ import json
 import concurrent.futures
 import threading
 import docker
+import random
 
 from r2egym.agenthub.runtime.docker import DockerRuntime
 from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
@@ -317,6 +318,7 @@ def runagent_multiple(
     prepull_images: bool = False,
     max_tokens: int = 65536,
     step_timeout: int = 180,
+    fix_random_seed: bool = False,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -329,6 +331,8 @@ def runagent_multiple(
         max_steps: Maximum steps for the agent run.
         max_workers: Maximum number of threads to use.
         prepull_images: Whether to prepull Docker images in parallel before starting execution.
+        fix_random_seed: If True, uses a fixed seed (42) for dataset shuffling to ensure reproducible runs.
+                        If False, uses time-based seed for true randomization.
     """
     # Load the dataset
     if dataset.endswith(".json"):
@@ -336,10 +340,21 @@ def runagent_multiple(
     else:
         ds = load_dataset(dataset, split=split)
     logger.info(f"{len(ds)}, {k}, {start_idx}")
-    # shuffle the dataset with time-based seed for true randomization
-    time_seed = int(time.time())
-    logger.info(f"Using time-based seed for shuffling: {time_seed}")
-    ds = ds.shuffle(seed=time_seed)
+    # shuffle the dataset with fixed or time-based seed
+    if fix_random_seed:
+        shuffle_seed = 42  # Fixed seed for reproducibility
+        logger.info(f"Using fixed seed for reproducible shuffling: {shuffle_seed}")
+        # Set additional random seeds for full reproducibility
+        random.seed(shuffle_seed)
+        try:
+            import numpy as np
+            np.random.seed(shuffle_seed)
+        except ImportError:
+            pass  # numpy not available, skip
+    else:
+        shuffle_seed = int(time.time())  # Time-based seed for true randomization
+        logger.info(f"Using time-based seed for shuffling: {shuffle_seed}")
+    ds = ds.shuffle(seed=shuffle_seed)
 
     # get selected idxs
     selected_idx = range(start_idx, start_idx + k)
