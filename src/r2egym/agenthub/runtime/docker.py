@@ -1162,7 +1162,7 @@ class DockerRuntime(ExecutionEnvironment):
         eval_type = EvalType.FAIL_ONLY if self.test_spec.repo in FAIL_ONLY_REPOS \
             else EvalType.PASS_AND_FAIL
         report = get_eval_tests_report(
-            eval_status_map, eval_ref, eval_type=eval_type(self.test_spec)
+            eval_status_map, eval_ref, eval_type=eval_type
         )
         success = get_resolution_status(report) == ResolvedStatus.FULL.value
         if get_test_output:
