@@ -44,7 +44,7 @@ from kubernetes import client, config, watch
 # For Kubernetes exec.
 from kubernetes.stream import stream
 
-DEFAULT_NAMESPACE = "default"
+DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 from swebench.harness.constants import (
