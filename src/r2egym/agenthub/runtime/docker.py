@@ -588,7 +588,7 @@ class DockerRuntime(ExecutionEnvironment):
             raise RuntimeError(f"Failed to apply patch. Git diff returned exit code {diff_error}: {diff_output}")
         else:
             self.logger.info(f"Applied patch resulted in diff:\n{diff_output[:500]}...")  # Log first 500 chars
-        print(f"Applied patch resulted in: {diff_output[:500]}")
+        # print(f"Applied patch resulted in: {diff_output[:500]}")
 
     def setup_env_synthetic_bugs(self):
         try:
