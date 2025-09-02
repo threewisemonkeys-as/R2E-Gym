@@ -1,3 +1,4 @@
+import random
 import os, sys
 import json
 from time import sleep
@@ -240,6 +241,8 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
+                "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
+                "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
                     {
@@ -251,26 +254,35 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "1", "memory": "1Gi"},
+                            "requests": {"cpu": "250m", "memory": "250Mi"},
                         },
                     }
                 ],
                 "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
                         "operator": "Exists",
                         "effect": "NoExecute",
                         "tolerationSeconds": 10800
-                    }
+                    },
+                    {
+                        "key": "kubernetes.azure.com/scalesetpriority",
+                        "operator": "Equal",
+                        "value": "spot",
+                        "effect": "NoSchedule"
+                    },
+                    {
+                        "key": "CriticalAddonsOnly",
+                        "operator": "Exists"
+                    },
                 ],
             },
         }
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
-        max_retries = 5
-        backoff = 5  # seconds
+        max_retries = 50
+        backoff = random.uniform(5, 10)  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -287,7 +299,7 @@ class DockerRuntime(ExecutionEnvironment):
                         f"retrying in {backoff}s"
                     )
                     time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    backoff = min(backoff * 2, 240)
                     continue
                 # Non-retryable error → propagate
                 self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
@@ -464,11 +476,58 @@ class DockerRuntime(ExecutionEnvironment):
              os.path.basename(f).startswith('test_') and os.path.basename(f).endswith('.py') or
              os.path.basename(f).endswith('_test.py')]
         commit_id = self.ds['base_commit']
-        reset_command = (
-            f'printf "%s\\n" {" ".join(all_files)} | '
-            f'xargs -n1 -I{{}} git checkout {commit_id} -- "{{}}" 2>/dev/null'
-        )
-        self.run(reset_command)
+        
+        if not all_files:
+            self.logger.info("No test files to reset")
+            return
+            
+        self.logger.info(f"Resetting {len(all_files)} test files to commit {commit_id}")
+        
+        # Use a simpler approach that works with /bin/sh
+        # Reset each file individually with proper error handling
+        files_reset = 0
+        files_skipped = 0
+        
+        for file_path in all_files:
+            import shlex
+            escaped_file = shlex.quote(file_path)
+            escaped_commit = shlex.quote(commit_id)
+            
+            # Check if file exists in the commit first
+            check_command = f'git ls-tree {escaped_commit} -- {escaped_file}'
+            check_result = self.run(check_command)
+            
+            # Ensure we got a valid result from self.run()
+            if check_result is None:
+                self.logger.warning(f"Failed to check if {file_path} exists in commit {commit_id}")
+                files_skipped += 1
+                continue
+                
+            check_output, check_error = check_result
+            
+            # If git ls-tree returned successfully and has output, the file exists
+            if check_error == "0" and check_output.strip():
+                reset_command = f'git checkout {escaped_commit} -- {escaped_file}'
+                reset_result = self.run(reset_command)
+                
+                if reset_result is None:
+                    self.logger.warning(f"Failed to reset {file_path}")
+                    files_skipped += 1
+                    continue
+                    
+                reset_output, reset_error = reset_result
+                
+                if reset_error == "0":
+                    self.logger.debug(f"Reset {file_path} to commit {commit_id}")
+                    files_reset += 1
+                else:
+                    self.logger.debug(f"Could not reset {file_path}: {reset_output}")
+                    files_skipped += 1
+            else:
+                self.logger.debug(f"File {file_path} not found in commit {commit_id}, skipping")
+                files_skipped += 1
+                
+        self.logger.info(f"Test files reset completed: {files_reset} reset, {files_skipped} skipped")
 
     def setup_env_swesmith(self):
         try:
@@ -636,19 +695,25 @@ class DockerRuntime(ExecutionEnvironment):
 
             self.run("find . -name '__pycache__' -exec rm -rf {} +")
 
-            # also delete pycache and pyc from /r2e_tests
-            self.run("find /r2e_tests -name '*.pyc' -delete")
-            self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
+            # also delete pycache and pyc from /r2e_tests (if it exists)
+            test_dir_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in test_dir_check:
+                self.run("find /r2e_tests -name '*.pyc' -delete")
+                self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
 
             # move all skip files (if present) to /root
             for skip_file in SKIP_FILES_NEW:
-                self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
+                # Check if skip file exists before trying to move it
+                skip_file_check, _ = self.run(f"test -f {self.repo_path}/{skip_file} && echo 'exists' || echo 'not found'")
+                if "exists" in skip_file_check:
+                    self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
 
-            # r2e_tests are in the / directory, move them to /root
-            self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
-
-            # make a softlink for /root/r2e_tests (if present)
-            self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
+            # r2e_tests are in the / directory, move them to /root (if they exist)
+            r2e_tests_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in r2e_tests_check:
+                self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
+                # make a softlink for /root/r2e_tests
+                self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
             # self.run(f"ln -s /r2e_tests {self.repo_path}/r2e_tests")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
@@ -861,8 +926,8 @@ class DockerRuntime(ExecutionEnvironment):
         tar_stream.seek(0)
 
         # Retry with exponential backoff
-        max_retries = 5
-        retry_delay = 5  # Initial delay in seconds
+        max_retries = 50
+        retry_delay = random.uniform(1, 30)  # Random initial delay between 1 and 30 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
@@ -887,7 +952,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.warning(f"Copy to container failed (attempt {attempt+1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
-                    retry_delay = min(retry_delay, 60)
+                    retry_delay = min(retry_delay, 240)
                     tar_stream.seek(0)  # Reset the stream for the next attempt
                 else:
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
@@ -1044,32 +1109,43 @@ class DockerRuntime(ExecutionEnvironment):
         pass2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['PASS_TO_PASS']]
         # @(Naman, Jas): Parse the output and return the reward. This implementation is a hack rn.
         if not parse:
-            return 0.0
+            reward = 0.0
+        else:
+            reward = 1.0
+            # Check fail2pass
+            for test_name in fail2pass:
+                if test_name not in parse:
+                    # Check if test_name is substring of any key
+                    matching_key = next((k for k in parse.keys() if test_name in k), None)
+                    if matching_key is None:
+                        reward = 0.0
+                        break
+                    if parse[matching_key] != 'PASSED':
+                        reward = 0.0
+                        break
+                    test_name = matching_key
+                if parse[test_name] != 'PASSED':
+                    reward = 0.0
+                    break
+            
+            # Check pass2pass only if fail2pass tests passed
+            if reward == 1.0:
+                for test_name in pass2pass:
+                    if test_name not in parse:
+                        # Check if test_name is substring of any key
+                        matching_key = next((k for k in parse.keys() if test_name in k), None)
+                        if matching_key is None:
+                            reward = 0.0
+                            break
+                        test_name = matching_key
+                    if parse[test_name] != 'PASSED':
+                        reward = 0.0
+                        break
         
-        # Check fail2pass
-        for test_name in fail2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                if parse[matching_key] != 'PASSED':
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        
-        # Check pass2pass
-        for test_name in pass2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        return 1.0
+        # If the caller wants the test output as well, return (reward, output)
+        if get_test_output:
+            return reward, output
+        return reward
 
 
     def _calculate_reward_swebench(self, get_test_output=False, timeout: int = 300) -> float:

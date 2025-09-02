@@ -6,6 +6,8 @@ authors = [
     {name = "Jaskirat Singh", email = "jaskirat.singh@anu.edu.au"},
 ]
 dependencies = [
+    "torch==2.7.1",
+    "vllm==0.10.1",
     "azure-identity==1.24.0",
     "pandas>=2.2.3",
     "tqdm>=4.66.5",
