@@ -236,6 +236,7 @@ class DockerRuntime(ExecutionEnvironment):
 
         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
+        current_node = os.environ["HOSTNAME"]
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
@@ -244,6 +245,23 @@ class DockerRuntime(ExecutionEnvironment):
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "kubernetes.io/hostname",
+                                            "operator": "In",
+                                            "values": [current_node]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                },
                 "containers": [
                     {
                         "name": pod_name,
