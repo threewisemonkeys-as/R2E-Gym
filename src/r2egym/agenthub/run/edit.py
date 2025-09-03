@@ -349,6 +349,9 @@ def runagent_multiple(
     logger.info(
         f"Dataset: {dataset}, Split: {split}, Num_total: {len(ds)}, Start Index: {start_idx}, k: {k}"
     )
+    logger.info(f"Selected {len(ds_selected)} entries from dataset")
+    unique_docker_images = len(set([ds_entry["docker_image"] for ds_entry in ds_selected]))
+    logger.info(f"Unique docker images in selection: {unique_docker_images}")
     logger.info(f"Starting editagent on {len(ds_selected)} Docker images.")
 
     # Generate a unique experiment name if not provided
