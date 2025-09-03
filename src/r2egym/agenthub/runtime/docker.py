@@ -237,10 +237,16 @@ class DockerRuntime(ExecutionEnvironment):
         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
         current_node = os.environ["HOSTNAME"]
+        job_id = os.environ.get("JOB_ID", "cai-job")
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {"name": pod_name},
+            "metadata": {
+                "name": pod_name, 
+                "labels": {
+                    "job_id": job_id
+                }
+            },
             "spec": {
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
