@@ -46,6 +46,9 @@ from kubernetes.stream import stream
 
 DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+datetime_format = "%Y-%m-%dT%H:%M:%SZ"
+current_time = datetime.datetime.now().strftime(datetime_format)
+JOB_ID = os.environ.get("JOB_ID", f"cai-job-{current_time}")
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -240,7 +243,12 @@ class DockerRuntime(ExecutionEnvironment):
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {"name": pod_name},
+            "metadata": {
+                "name": pod_name, 
+                "labels": {
+                    "job_id": JOB_ID
+                }
+            },
             "spec": {
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
@@ -299,7 +307,7 @@ class DockerRuntime(ExecutionEnvironment):
         }
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
-        max_retries = 20
+        max_retries = 50
         backoff = random.uniform(5, 10)  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
@@ -317,7 +325,7 @@ class DockerRuntime(ExecutionEnvironment):
                         f"retrying in {backoff}s"
                     )
                     time.sleep(backoff)
-                    backoff = backoff * 2
+                    backoff = min(backoff * 2, 240)
                     continue
                 # Non-retryable error → propagate
                 self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
@@ -606,7 +614,7 @@ class DockerRuntime(ExecutionEnvironment):
             raise RuntimeError(f"Failed to apply patch. Git diff returned exit code {diff_error}: {diff_output}")
         else:
             self.logger.info(f"Applied patch resulted in diff:\n{diff_output[:500]}...")  # Log first 500 chars
-        print(f"Applied patch resulted in: {diff_output[:500]}")
+        # print(f"Applied patch resulted in: {diff_output[:500]}")
 
     def setup_env_synthetic_bugs(self):
         try:
@@ -944,8 +952,8 @@ class DockerRuntime(ExecutionEnvironment):
         tar_stream.seek(0)
 
         # Retry with exponential backoff
-        max_retries = 20
-        retry_delay = random.uniform(5, 10)  # Random initial delay between 5 and 10 seconds
+        max_retries = 50
+        retry_delay = random.uniform(1, 30)  # Random initial delay between 1 and 30 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
@@ -970,6 +978,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.warning(f"Copy to container failed (attempt {attempt+1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
+                    retry_delay = min(retry_delay, 240)
                     tar_stream.seek(0)  # Reset the stream for the next attempt
                 else:
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
