@@ -508,7 +508,15 @@ class Agent:
                     "messages": messages,
                     "max_tokens": 8192,
                 }
-                
+                BOOST_GPT5_REASONING = os.environ.get("BOOST_GPT5_REASONING", False)
+                if BOOST_GPT5_REASONING and "gpt-5" in model:
+                    # merge a specific user message into the messages to boost reasoning content generation
+                    reasoning_boost_instruction = "Think step by step, generate both your content and the tool call. \nGenerate your content in this format:\n<think> reasoning </think>.\n\nStick to this output format, do not share your private reasoning inside the <think> tags, instead, provide a summary rationale for your tool call."
+                    if messages[-1]["role"] == "user":
+                        messages[-1]["content"] = messages[-1]["content"] + "\n\n" + reasoning_boost_instruction
+                    else:
+                        messages.append({"role": "user", "content": reasoning_boost_instruction})
+
                 # Add temperature and top_p for models that support them
                 not_temperature_models = [
                     "o3-mini-2025-01-31",
@@ -560,6 +568,11 @@ class Agent:
 
                     litellm_response = litellm.types.utils.ModelResponse(**response_dict)
                     return litellm_response
+
+                if BOOST_GPT5_REASONING and "gpt-5" in model:
+                    # if the llm generates a content with <think> tags, extract the content
+                    if response.choices[0].message.content:
+                        response.choices[0].message.content = response.choices[0].message.content.replace("<think>", "").replace("</think>", "")
 
                 # Default path: serialize ChatCompletion object before wrapping
                 litellm_response = litellm.types.utils.ModelResponse(**response.model_dump())
