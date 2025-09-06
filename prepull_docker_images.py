@@ -38,4 +38,4 @@ if __name__ == "__main__":
         total_set.update(docker_images)
 
 
-    prepull_docker_images(list(total_set), max_workers=100, timeout=600)
+    prepull_docker_images(list(total_set), max_workers=100)
