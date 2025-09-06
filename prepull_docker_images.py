@@ -6,7 +6,11 @@ import argparse
 def get_docker_images(dataset_name):
     verl_parquet_path = glob.glob(dataset_name + "*_verl.parquet")[0]
     df = pd.read_parquet(verl_parquet_path)
-    return df["docker_image"].unique().tolist()
+    docker_images = set()
+    for i in range(len(df)):
+        image = df["extra_info"][i]['docker_image']
+        docker_images.add(image)
+    return docker_images
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Prepull Docker images from datasets')
