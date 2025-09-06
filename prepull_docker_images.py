@@ -31,8 +31,9 @@ if __name__ == "__main__":
         "SWE_Bench_Verified"
     ]
 
-    for dataset in datasets:
-        verl_parquet_path = glob.glob(dataset + "*_verl.parquet")[0]
+    for dataset in tqdm(datasets):
+        dataset_path = base_path + dataset + "/"
+        verl_parquet_path = glob.glob(dataset_path + "*_verl.parquet")[0]
         ds = pd.read_parquet(base_path + "dataset_info.parquet")
         prepull_docker_images(ds, max_workers=100)
 
