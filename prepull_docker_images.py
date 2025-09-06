@@ -32,7 +32,7 @@ if __name__ == "__main__":
     ]
 
     for dataset in datasets:
-        verl_parquet_path = glob.glob(dataset_name + "*_verl.parquet")[0]
+        verl_parquet_path = glob.glob(dataset + "*_verl.parquet")[0]
         ds = pd.read_parquet(base_path + "dataset_info.parquet")
         prepull_docker_images(ds, max_workers=100)
 
