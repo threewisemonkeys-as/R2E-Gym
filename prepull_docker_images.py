@@ -31,11 +31,16 @@ if __name__ == "__main__":
         "SWE_Bench_Verified"
     ]
 
-    total_set = set()
-    for dataset in tqdm(datasets):
-        dataset_path = base_path + dataset + "/"
-        docker_images = get_docker_images(dataset_path)
-        total_set.update(docker_images)
+    for dataset in datasets:
+        verl_parquet_path = glob.glob(dataset_name + "*_verl.parquet")[0]
+        ds = pd.read_parquet(base_path + "dataset_info.parquet")
+        prepull_docker_images(ds, max_workers=100)
+
+    # total_set = set()
+    # for dataset in tqdm(datasets):
+    #     dataset_path = base_path + dataset + "/"
+    #     docker_images = get_docker_images(dataset_path)
+    #     total_set.update(docker_images)
 
 
-    prepull_docker_images(list(total_set), max_workers=100)
+    
