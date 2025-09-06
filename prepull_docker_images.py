@@ -2,13 +2,18 @@ from r2egym.agenthub.run.edit import prepull_docker_images
 import pandas as pd 
 import glob
 import argparse
+from tqdm import tqdm
 
 def get_docker_images(dataset_name):
     verl_parquet_path = glob.glob(dataset_name + "*_verl.parquet")[0]
     df = pd.read_parquet(verl_parquet_path)
     docker_images = set()
     for i in range(len(df)):
-        image = df["extra_info"][i]['docker_image']
+        try: 
+            image = df["extra_info"][i]['docker_image']
+        except KeyError:
+            print(f"No docker image found for index {i} in dataset {dataset_name}")
+            continue
         docker_images.add(image)
     return docker_images
 
@@ -27,7 +32,7 @@ if __name__ == "__main__":
     ]
 
     total_set = set()
-    for dataset in datasets:
+    for dataset in tqdm(datasets):
         dataset_path = base_path + dataset + "/"
         docker_images = get_docker_images(dataset_path)
         total_set.update(docker_images)
