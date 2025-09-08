@@ -924,9 +924,10 @@ class Agent:
 
             if self.use_fn_calling:
                 thought, action = self.custom_parser(response)
-            else:
+            elif "capi-" in self.llm_name or "trapi-" in self.llm_name:
                 thought, action = self.parse_response(assistant_message)
-            
+            else:
+                thought, action = self.parse_response_v2(assistant_message)
             # Parse alternative responses for structured data
             parsed_alternative_responses = []
             if alternative_responses:
@@ -936,8 +937,10 @@ class Agent:
                             alt_thought, alt_action = self.custom_parser(alt_resp)
                         else:
                             alt_message = alt_resp.choices[0].message.content if hasattr(alt_resp, 'choices') and alt_resp.choices else ""
-                            alt_thought, alt_action = self.parse_response(alt_message)
-                        
+                            if "capi-" in self.llm_name or "trapi-" in self.llm_name:
+                                alt_thought, alt_action = self.parse_response(alt_message)
+                            else:
+                                alt_thought, alt_action = self.parse_response_v2(alt_message)
                         parsed_alternative_responses.append({
                             "thought": alt_thought,
                             "action": alt_action.to_xml_string()
