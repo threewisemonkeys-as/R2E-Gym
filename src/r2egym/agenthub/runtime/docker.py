@@ -44,8 +44,11 @@ from kubernetes import client, config, watch
 # For Kubernetes exec.
 from kubernetes.stream import stream
 
-DEFAULT_NAMESPACE = "default"
+DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+datetime_format = "%Y-%m-%dT%H:%M:%SZ"
+current_time = datetime.datetime.now().strftime(datetime_format)
+JOB_ID = os.environ.get("JOB_ID", f"cai-job-{current_time}")
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -236,14 +239,37 @@ class DockerRuntime(ExecutionEnvironment):
 
         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
+        current_node = os.environ["HOSTNAME"]
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {"name": pod_name},
+            "metadata": {
+                "name": pod_name, 
+                "labels": {
+                    "job_id": JOB_ID
+                }
+            },
             "spec": {
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "kubernetes.io/hostname",
+                                            "operator": "In",
+                                            "values": [current_node]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                },
                 "containers": [
                     {
                         "name": pod_name,
