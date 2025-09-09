@@ -46,6 +46,7 @@ from kubernetes.stream import stream
 
 DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+LOAD_INCLUSTER_KUBE_CONFIG = int(os.environ.get("LOAD_INCLUSTER_KUBE_CONFIG", '0'))
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -147,11 +148,11 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "docker":
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
-            # Try in-cluster config first, fallback to kubeconfig
-            try:
-                config.load_incluster_config()
-            except Exception:
+            # use LOAD_INCLUSTER_KUBE_CONFIG to decide what to load
+            if LOAD_INCLUSTER_KUBE_CONFIG == 0:
                 config.load_kube_config()
+            else:
+                config.load_incluster_config()
             self.client = client.CoreV1Api()
 
         # Start the container
