@@ -238,6 +238,26 @@ class DockerRuntime(ExecutionEnvironment):
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
         current_node = os.environ["HOSTNAME"]
         job_id = os.environ.get("JOB_ID", "cai-job")
+        
+        from kubernetes import client, config
+        import ray
+
+        ray.init(address="auto")
+
+        # Load in-cluster config
+        config.load_incluster_config()
+        v1 = client.CoreV1Api()
+
+        # List all pods in your namespace
+        pods = v1.list_namespaced_pod(DEFAULT_NAMESPACE).items
+        pod_map = {p.status.pod_ip: p.spec.node_name for p in pods}
+
+        for node in ray.nodes():
+            ip = node["NodeManagerAddress"]
+            kube_node = pod_map.get(ip)
+            print(f"Ray IP={ip} runs on K8s node={kube_node}")
+
+
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
