@@ -35,7 +35,7 @@ if __name__ == "__main__":
         dataset_path = base_path + dataset + "/"
         verl_parquet_path = glob.glob(dataset_path + "*_verl.parquet")[0]
         ds = pd.read_parquet(verl_parquet_path)
-        prepull_docker_images(ds, max_workers=100)
+        prepull_docker_images(ds['extra_info'], max_workers=100)
 
     # total_set = set()
     # for dataset in tqdm(datasets):

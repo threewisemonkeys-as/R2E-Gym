@@ -240,7 +240,7 @@ class DockerRuntime(ExecutionEnvironment):
         current_node = os.environ["HOSTNAME"]
         job_id = os.environ.get("JOB_ID", "cai-job")
 
-        ray.init(address="auto")
+        # ray.init(address="auto")
         node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
         
         # pick one node name at random
