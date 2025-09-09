@@ -242,6 +242,10 @@ class DockerRuntime(ExecutionEnvironment):
 
         ray.init(address="auto")
         node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
+        
+        # pick one node name at random
+        node_name = random.sample(node_names, 1)[0]
+        print("Selected node for pod placement:", node_name)
 
         pod_body = {
             "apiVersion": "v1",
@@ -265,7 +269,7 @@ class DockerRuntime(ExecutionEnvironment):
                                         {
                                             "key": "kubernetes.io/hostname",
                                             "operator": "In",
-                                            "values": node_names
+                                            "values": [node_name]
                                         }
                                     ]
                                 }
