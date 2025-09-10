@@ -47,6 +47,7 @@ from kubernetes.stream import stream
 DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 KUBE_CONFIG_PATH = os.environ.get("KUBE_CONFIG_PATH", None)
+KUBE_POD_AFFINITY_MODE = os.environ.get("KUBE_POD_AFFINITY_MODE", "host_only")
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -245,23 +246,6 @@ class DockerRuntime(ExecutionEnvironment):
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
-                "affinity": {
-                    "nodeAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                            "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "kubernetes.io/hostname",
-                                            "operator": "In",
-                                            "values": [current_node]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                },
                 "containers": [
                     {
                         "name": pod_name,
@@ -297,6 +281,29 @@ class DockerRuntime(ExecutionEnvironment):
                 ],
             },
         }
+
+        if KUBE_POD_AFFINITY_MODE == "host_only":
+            pod_body["spec"]["affinity"] = {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "kubernetes.io/hostname",
+                                        "operator": "In",
+                                        "values": [current_node]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        elif KUBE_POD_AFFINITY_MODE == "unrestricted":
+            pass
+        else:
+            raise RuntimeError(f"Unknown value of KUBE_POD_AFFINITY_MODE: {KUBE_POD_AFFINITY_MODE}")
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
         max_retries = 50
