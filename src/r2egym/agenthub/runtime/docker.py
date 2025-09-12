@@ -246,8 +246,8 @@ class DockerRuntime(ExecutionEnvironment):
         random.shuffle(node_names)  # Shuffle to distribute load randomly
         
         # pick one node name at random
-        # node_name = random.sample(node_names, 1)[0]
-        # print("Selected node for pod placement:", node_name)
+        node_name = random.sample(node_names, 1)[0]
+        print("Selected node for pod placement:", node_name)
 
         pod_body = {
             "apiVersion": "v1",
@@ -271,7 +271,7 @@ class DockerRuntime(ExecutionEnvironment):
                                         {
                                             "key": "kubernetes.io/hostname",
                                             "operator": "In",
-                                            "values": node_names
+                                            "values": [node_name]
                                         }
                                     ]
                                 }
