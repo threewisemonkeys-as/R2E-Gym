@@ -48,6 +48,7 @@ DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 KUBE_CONFIG_PATH = os.environ.get("KUBE_CONFIG_PATH", None)
 KUBE_POD_AFFINITY_MODE = os.environ.get("KUBE_POD_AFFINITY_MODE", "host_only")
+KUBE_DOCKER_SECRET_NAME = os.environ.get("KUBE_DOCKER_SECRET_NAME", "dockerhub-pro")
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -260,7 +261,7 @@ class DockerRuntime(ExecutionEnvironment):
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                "imagePullSecrets": [{"name": KUBE_DOCKER_SECRET_NAME}],
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
