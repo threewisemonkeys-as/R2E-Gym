@@ -46,9 +46,10 @@ from kubernetes.stream import stream
 
 DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-datetime_format = "%Y-%m-%dT%H:%M:%SZ"
-current_time = datetime.datetime.now().strftime(datetime_format)
-JOB_ID = os.environ.get("JOB_ID", f"cai-job-{current_time}")
+KUBE_CONFIG_PATH = os.environ.get("KUBE_CONFIG_PATH", None)
+KUBE_POD_AFFINITY_MODE = os.environ.get("KUBE_POD_AFFINITY_MODE", "host_only")
+KUBE_DOCKER_SECRET = os.environ.get("KUBE_DOCKER_SECRET", "mtl-rl-alsordon-key")
+
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -150,11 +151,10 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "docker":
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
-            # Try in-cluster config first, fallback to kubeconfig
-            try:
+            if KUBE_CONFIG_PATH is None:
                 config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            else:
+                config.load_kube_config(config_file=KUBE_CONFIG_PATH)
             self.client = client.CoreV1Api()
 
         # Start the container
@@ -243,33 +243,11 @@ class DockerRuntime(ExecutionEnvironment):
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
-            "metadata": {
-                "name": pod_name, 
-                "labels": {
-                    "job_id": JOB_ID
-                }
-            },
+            "metadata": {"name": pod_name},
             "spec": {
                 "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
-                "affinity": {
-                    "nodeAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                            "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "kubernetes.io/hostname",
-                                            "operator": "In",
-                                            "values": [current_node]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                },
                 "containers": [
                     {
                         "name": pod_name,
@@ -284,7 +262,7 @@ class DockerRuntime(ExecutionEnvironment):
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
+                "imagePullSecrets": [{"name": KUBE_DOCKER_SECRET}],
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
@@ -305,6 +283,29 @@ class DockerRuntime(ExecutionEnvironment):
                 ],
             },
         }
+
+        if KUBE_POD_AFFINITY_MODE == "host_only":
+            pod_body["spec"]["affinity"] = {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "kubernetes.io/hostname",
+                                        "operator": "In",
+                                        "values": [current_node]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        elif KUBE_POD_AFFINITY_MODE == "unrestricted":
+            pass
+        else:
+            raise RuntimeError(f"Unknown value of KUBE_POD_AFFINITY_MODE: {KUBE_POD_AFFINITY_MODE}")
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
         max_retries = 50
