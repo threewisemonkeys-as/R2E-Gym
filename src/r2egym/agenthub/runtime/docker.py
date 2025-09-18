@@ -244,7 +244,7 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
-                "activeDeadlineSeconds": 1800 + 120,  # 30min timeout + buffer
+                "activeDeadlineSeconds": 3600 + 120,  # 60min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
