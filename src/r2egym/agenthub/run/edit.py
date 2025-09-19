@@ -385,7 +385,6 @@ def runagent_collect(
             if not hasattr(trajectory, 'problem_statement') or trajectory.problem_statement is None or trajectory.problem_statement == "":
                 trajectory.problem_statement = ds.get("problem_statement", "No problem statement available")
 
-            # otherwise continue iteratively
             trajectories.append(trajectory)
         
     except Exception as e:
