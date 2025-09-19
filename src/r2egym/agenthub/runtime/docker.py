@@ -259,7 +259,7 @@ class DockerRuntime(ExecutionEnvironment):
                 }
             },
             "spec": {
-                "activeDeadlineSeconds": 3600 + 120,  # 60min timeout + buffer
+                "activeDeadlineSeconds": 5400 + 120,  # 90min timeout + buffer
                 "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "affinity": {
