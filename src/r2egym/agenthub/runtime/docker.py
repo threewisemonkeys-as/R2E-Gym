@@ -245,8 +245,6 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
-                "activeDeadlineSeconds": 3600 + 120,  # 30min timeout + buffer
-                "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
                     {
@@ -258,7 +256,7 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "250m", "memory": "250Mi"},
+                            "requests": {"cpu": "1", "memory": "1Gi"},
                         },
                     }
                 ],
