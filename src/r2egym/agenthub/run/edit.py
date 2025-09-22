@@ -189,6 +189,7 @@ def run_agent_with_restarts(
     trajectory = min(trajectories, key=lambda x: x.num_steps)
     return trajectory
 
+
 def runagent(
     ds,
     exp_name: Optional[str] = None,
@@ -293,6 +294,290 @@ def runagent(
     # close env and docker runtime
     logger.info(f"Closing environment for Docker image: {ds['docker_image']}")
     return trajectory.model_dump_json()
+
+
+def runagent_collect(
+    ds,
+    exp_name: Optional[str] = None,
+    max_steps=40,
+    num_restarts=1,
+    max_steps_absolute=50,
+    llm_name="gpt-4o",
+    temperature=0,
+    use_fn_calling: bool = True,
+    backend: str = "kubernetes", # "kubernetes" or "docker"
+    max_reward_calc_time: int = 300,
+    max_iterations: int = 1,
+    scaffold: str = "r2egym",
+    max_tokens: int = 65536,
+    step_timeout: int = 90,
+) -> Optional[str]:
+    """
+    Runs the editagent agent on a specified Docker image.
+
+    Args:
+        docker_image: The Docker image to use for the environment.
+        traj_dir: Directory to save trajectories.
+        jsonl_file: Path to the JSONL file to save results. If not provided, generated using traj_dir and exp_name.
+        exp_name: Experiment name. Used if jsonl_file is not provided. If not provided, a unique name is generated.
+    """
+    logger = setup_logging(
+        name=ds["docker_image"].replace("/", "_"),
+        log_file=f"run_logs/{exp_name}/{ds['docker_image'].replace('/', '_')}.log",
+        console=True,
+        level=INFO,
+    )
+    logger.info(f"Starting editagent on Docker image: {ds['docker_image']}")
+    logger.info(f"Using LLM: {llm_name}")
+    logger.info(f"Max Steps: {max_steps}")
+
+    assert scaffold in ["r2egym", "sweagent", "openhands"], f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands]"
+    # Generate a unique experiment name if not provided
+    if exp_name is None:
+        exp_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Initialize environment arguments
+    env_args = EnvArgs(ds=ds)
+
+    # Initialize the RepoEnv
+    env = RepoEnv(env_args, logger=logger, backend=backend, step_timeout=step_timeout)
+    # set agent args
+    if use_fn_calling:
+        assert scaffold != "sweagent", "SWEagent scaffold does not support fn calling"
+        agent_args = AgentArgs.from_yaml(
+            Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_fn_calling.yaml")
+        )
+    else:
+        agent_args = AgentArgs.from_yaml(
+            Path(f"./src/r2egym/agenthub/config/{scaffold}/edit_non_fn_calling.yaml")
+        )
+    agent_args.llm_name = llm_name
+
+    # Initialize the agent
+    agent = Agent(name="EditAgent", args=agent_args, logger=logger)
+
+    # run agent editagent
+    try:
+        trajectories = []
+        for iteration in range(max_iterations):
+            trajectory = agent.run(
+                env,
+                max_steps=max_steps,
+                temperature=temperature,
+                max_steps_absolute=max_steps_absolute,
+                use_fn_calling=use_fn_calling,
+                scaffold=scaffold,
+                max_token_limit=max_tokens,
+            )
+            # also get the gt outputs
+            reward_calc_time = time.time()
+            reward, test_output = env.runtime._calculate_reward(get_test_output=True, timeout=max_reward_calc_time)
+            reward_calc_time = time.time() - reward_calc_time
+
+            # update the trajectory object
+            trajectory.reward = reward
+            trajectory.test_output = test_output
+            trajectory.ds = ds
+            trajectory.exp_name = exp_name
+            trajectory.reward_calc_time = reward_calc_time # time taken to calculate reward
+  
+            # Ensure problem_statement is set from dataset if it's None or empty
+            if not hasattr(trajectory, 'problem_statement') or trajectory.problem_statement is None or trajectory.problem_statement == "":
+                trajectory.problem_statement = ds.get("problem_statement", "No problem statement available")
+
+            trajectories.append(trajectory)
+        
+    except Exception as e:
+        logger.error(
+            f"Error during agent run for Docker image {ds['docker_image']}: {e}"
+        )
+        return None
+
+    # Close the environment and runtime
+    env.close()
+
+    logger.info(f"editagent completed for Docker image: {ds['docker_image']}")
+    logger.info(f"Closing environment for Docker image: {ds['docker_image']}")
+    return [trajectory.model_dump_json() for trajectory in trajectories]
+
+
+def runagent_collect_multiple(
+    dataset: str,
+    split: str,
+    k: int = 1,
+    traj_dir: str = "./traj",
+    exp_name: Optional[str] = None,
+    start_idx=0,
+    max_steps=40,
+    num_restarts=1,
+    max_steps_absolute=50,
+    max_workers: Optional[int] = None,
+    llm_name="gpt-4o",
+    use_existing: bool = True,
+    skip_existing: bool = False,
+    temperature: float = 0,
+    use_fn_calling: bool = True,
+    backend: str = "kubernetes", # "kubernetes" or "docker"
+    max_reward_calc_time: int = 300,
+    max_iterations: int = 1,
+    scaffold: str = "r2egym",
+    prepull_images: bool = False,
+    max_tokens: int = 65536,
+    step_timeout: int = 180,
+    fix_random_seed: bool = False,
+):
+    """
+    Runs the editagent agent on the first k Docker images.
+
+    Args:
+        k: The number of Docker images to process.
+        traj_dir: Directory to save trajectories.
+        exp_name: Experiment name for the JSONL file. If not provided, a unique name is generated.
+        start_idx: The starting index in the Docker images list.
+        max_steps: Maximum steps for the agent run.
+        max_workers: Maximum number of threads to use.
+        prepull_images: Whether to prepull Docker images in parallel before starting execution.
+        fix_random_seed: If True, uses a fixed seed (42) for dataset shuffling to ensure reproducible runs.
+                        If False, uses time-based seed for true randomization.
+    """
+    # Load the dataset
+    if dataset.endswith(".json"):
+        ds = load_dataset("json", data_files=dataset, split=split)
+    else:
+        ds = load_dataset(dataset, split=split)
+    logger.info(f"{len(ds)}, {k}, {start_idx}")
+    # shuffle the dataset with fixed or time-based seed
+    if fix_random_seed:
+        shuffle_seed = 42  # Fixed seed for reproducibility
+        logger.info(f"Using fixed seed for reproducible shuffling: {shuffle_seed}")
+        # Set additional random seeds for full reproducibility
+        random.seed(shuffle_seed)
+        try:
+            import numpy as np
+            np.random.seed(shuffle_seed)
+        except ImportError:
+            pass  # numpy not available, skip
+    else:
+        shuffle_seed = int(time.time())  # Time-based seed for true randomization
+        logger.info(f"Using time-based seed for shuffling: {shuffle_seed}")
+    ds = ds.shuffle(seed=shuffle_seed)
+
+    # get selected idxs
+    selected_idx = range(start_idx, start_idx + k)
+    ds_selected = [ds[i] for i in selected_idx]
+
+    # print ds_selected stats
+    logger.info(
+        f"Dataset: {dataset}, Split: {split}, Num_total: {len(ds)}, Start Index: {start_idx}, k: {k}"
+    )
+    logger.info(f"Selected {len(ds_selected)} entries from dataset")
+    unique_docker_images = len(set([ds_entry["docker_image"] for ds_entry in ds_selected]))
+    logger.info(f"Unique docker images in selection: {unique_docker_images}")
+    logger.info(f"Starting editagent on {len(ds_selected)} Docker images.")
+
+    # Generate a unique experiment name if not provided
+    if exp_name is None:
+        exp_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Ensure traj_dir exists
+    traj_dir_path = Path(traj_dir)
+    traj_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate a filename for the JSONL file
+    jsonl_file = traj_dir_path / f"{exp_name}.jsonl"
+
+    if use_existing:
+        if jsonl_file.exists():
+            with open(jsonl_file) as f:
+                existing_instance_ids = []
+                for line in f.readlines():
+                    try:
+                        trajectory_data = Trajectory.load_from_model_dump_json(line)
+                        instance_id = trajectory_data.ds.get("instance_id")
+                        if instance_id:
+                            existing_instance_ids.append(instance_id)
+                    except:
+                        print("error in jsonl file")
+
+            logger.info(f"Found {len(existing_instance_ids)} existing trajectories")
+            logger.info(f"Unique existing instance IDs: {len(set(existing_instance_ids))}")
+            
+            ds_selected = [
+                ds_entry
+                for ds_entry in ds_selected
+                if ds_entry.get("instance_id") not in existing_instance_ids
+            ]
+
+    if skip_existing:
+        old_jsonl_files_glob = f"{exp_name[:-1]}*"
+        for old_jsonl_file in traj_dir_path.glob(old_jsonl_files_glob):
+            with open(old_jsonl_file) as f:
+                existing_instance_ids = [
+                    loadline["ds"]["instance_id"]
+                    for line in f
+                    for loadline in [json.loads(line)]
+                    if loadline["reward"] == 1 and "instance_id" in loadline["ds"]
+                ]
+
+            ds_selected = [
+                ds_entry
+                for ds_entry in ds_selected
+                if ds_entry.get("instance_id") not in existing_instance_ids
+            ]
+
+    logger.info(
+        f"Starting editagent on {len(ds_selected)} Docker images after filtering."
+    )
+
+    # Prepull all Docker images in parallel before starting main execution
+    if ds_selected and prepull_images:
+        logger.info("Prepulling Docker images before starting main execution...")
+        prepull_docker_images(ds_selected, max_workers=max_workers)
+        logger.info("Docker image prepull completed.")
+
+    # with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks to the executor using keyword arguments
+        future_to_image = {
+            executor.submit(
+                runagent_collect,
+                ds=ds_entry,
+                exp_name=exp_name,
+                max_steps=max_steps,
+                num_restarts=num_restarts,
+                max_steps_absolute=max_steps_absolute,
+                llm_name=llm_name,
+                temperature=temperature,
+                use_fn_calling=use_fn_calling,
+                backend=backend,
+                max_reward_calc_time=max_reward_calc_time,
+                max_iterations=max_iterations,
+                scaffold=scaffold,
+                max_tokens=max_tokens,
+                step_timeout=step_timeout,
+            ): ds_entry["docker_image"] if "docker_image" in ds_entry else ds_entry["image_name"]
+            for ds_entry in ds_selected
+        }
+
+        with open(jsonl_file, "a") as f:
+            for future in concurrent.futures.as_completed(future_to_image):
+                docker_image = future_to_image[
+                    future
+                ]  # <-- retrieve that stored docker_image
+                try:
+                    result = future.result(timeout=1800)
+                    if result is not None:
+                        with file_lock:
+                            if type(result) == list:
+                                for res in result:
+                                    f.write(res + "\n")
+                            else:
+                                f.write(result + "\n")
+                except Exception as e:
+                    # Use docker_image from above when logging
+                    logger.error(f"Exception for Docker image {docker_image}: {e}")
+
+    logger.info(f"editagent completed on {len(ds_selected)} Docker images.")
 
 
 def runagent_multiple(
@@ -459,10 +744,14 @@ def runagent_multiple(
                     future
                 ]  # <-- retrieve that stored docker_image
                 try:
-                    result = future.result()
+                    result = future.result(timeout=1800)
                     if result is not None:
                         with file_lock:
-                            f.write(result + "\n")
+                            if type(result) == list:
+                                for res in result:
+                                    f.write(res + "\n")
+                            else:
+                                f.write(result + "\n")
                 except Exception as e:
                     # Use docker_image from above when logging
                     logger.error(f"Exception for Docker image {docker_image}: {e}")
@@ -476,5 +765,6 @@ if __name__ == "__main__":
         {
             "runagent": runagent,
             "runagent_multiple": runagent_multiple,
+            "runagent_collect_multiple": runagent_collect_multiple,
         }
     )
