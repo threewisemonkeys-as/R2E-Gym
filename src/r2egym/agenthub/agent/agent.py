@@ -144,7 +144,25 @@ class Agent:
         self.max_retries = self.other_args.get("max_retries", 5)
         self.llm_timeout = self.other_args.get("timeout", 3000)
 
+    def _history_cutoff(self, messages, history_cutoff: Optional[int]):
+        """Cut off the history to fit within the token limit."""
+        total_tokens = self._count_tokens(messages)
+        if total_tokens <= history_cutoff:
+            return messages
 
+        # take first three messages
+        head = messages[:3]
+        # Include first 3 messages + last (cutoff-3) messages up to current position
+        trimmed_context = []
+        total_tokens = self._count_tokens(head)
+        for msg in reversed(messages[3:]):
+            num_tokens = self._count_tokens([msg])
+            if total_tokens + num_tokens > history_cutoff:
+                break
+            trimmed_context.append(msg)
+            total_tokens += num_tokens
+        messages = head + list(reversed(trimmed_context))
+        return messages
 
     def prepare_system_message(
         self, problem_statement: str, structure: str, command_docs: str, demo: str
@@ -260,7 +278,7 @@ class Agent:
         if total_tokens > MAX_CONTEXT_TOKENS:
             logger.warning(f"Total tokens: {total_tokens} > {MAX_CONTEXT_TOKENS}")
             raise ValueError(f"Total tokens: {total_tokens} > {MAX_CONTEXT_TOKENS}")
-        
+
         # query the model with retries
         while retries < self.max_retries:
             try:
@@ -795,6 +813,7 @@ class Agent:
         scaffold: str = "r2egym",
         # k responses support
         k_responses: int = 1,
+        history_token_cutoff: Optional[int] = -1,
     ):
         assert scaffold in ["r2egym", "openhands", "sweagent"], "Scaffold must be either r2egym or openhands or sweagent"
         self.scaffold = scaffold
@@ -885,6 +904,12 @@ class Agent:
 
             # Query the LLM
             messages = copy.deepcopy(self.history)
+            if history_token_cutoff > 0 and len(messages) > 3:
+                self.logger.info(f"Applying history token cutoff: {history_token_cutoff}!")
+                self.logger.info(f"Total messages before cutoff: {len(messages)}")
+                messages = self._history_cutoff(messages, history_token_cutoff)
+                self.logger.info(f"Total messages after cutoff: {len(messages)}")
+
             try:
                 responses, llm_exec_time = self.model_query(messages, temperature, k_responses)
                 response = responses[0]  # Use first response for execution

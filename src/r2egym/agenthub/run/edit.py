@@ -133,6 +133,7 @@ def run_agent_with_restarts(
     max_iterations: int = 1,
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
+    history_token_cutoff: int = -1,
 ):
     """
     Iterative eval protocol:
@@ -174,6 +175,7 @@ def run_agent_with_restarts(
                 use_fn_calling=use_fn_calling,
                 scaffold=scaffold,
                 max_token_limit=max_tokens,
+                history_token_cutoff=history_token_cutoff,
             )
             # remove reproduce.py
             # env.runtime.run('rm reproduce_issue.py')
@@ -205,6 +207,7 @@ def runagent(
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
     step_timeout: int = 90,
+    history_token_cutoff: int = -1,
 ) -> Optional[str]:
     """
     Runs the editagent agent on a specified Docker image.
@@ -263,6 +266,7 @@ def runagent(
             max_iterations=max_iterations,
             scaffold=scaffold,
             max_tokens=max_tokens,
+            history_token_cutoff=history_token_cutoff,
         )
     except Exception as e:
         logger.error(
@@ -311,6 +315,7 @@ def runagent_collect(
     scaffold: str = "r2egym",
     max_tokens: int = 65536,
     step_timeout: int = 90,
+    history_token_cutoff: int = -1,
 ) -> Optional[str]:
     """
     Runs the editagent agent on a specified Docker image.
@@ -368,6 +373,7 @@ def runagent_collect(
                 use_fn_calling=use_fn_calling,
                 scaffold=scaffold,
                 max_token_limit=max_tokens,
+                history_token_cutoff=history_token_cutoff,
             )
             # also get the gt outputs
             reward_calc_time = time.time()
@@ -604,6 +610,7 @@ def runagent_multiple(
     max_tokens: int = 65536,
     step_timeout: int = 180,
     fix_random_seed: bool = False,
+    history_token_cutoff: int = -1,
 ):
     """
     Runs the editagent agent on the first k Docker images.
@@ -734,6 +741,7 @@ def runagent_multiple(
                 scaffold=scaffold,
                 max_tokens=max_tokens,
                 step_timeout=step_timeout,
+                history_token_cutoff=history_token_cutoff,
             ): ds_entry["docker_image"] if "docker_image" in ds_entry else ds_entry["image_name"]
             for ds_entry in ds_selected
         }
@@ -744,7 +752,7 @@ def runagent_multiple(
                     future
                 ]  # <-- retrieve that stored docker_image
                 try:
-                    result = future.result()
+                    result = future.result(timeout=1800)
                     if result is not None:
                         with file_lock:
                             if type(result) == list:
