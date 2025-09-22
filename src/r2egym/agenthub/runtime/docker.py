@@ -245,6 +245,7 @@ class DockerRuntime(ExecutionEnvironment):
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
+                "activeDeadlineSeconds": 3600,  # 1 hour max lifetime
                 "restartPolicy": "Never",
                 "containers": [
                     {
