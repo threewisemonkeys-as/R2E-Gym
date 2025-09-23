@@ -224,6 +224,43 @@ def runagent(
     logger.info(f"Using LLM: {llm_name}")
     logger.info(f"Max Steps: {max_steps}")
 
+    # Early validation: Check if critical fields exist before running agent to avoid API costs
+    missing_fields = []
+    
+    # Check for docker image
+    if "docker_image" not in ds and "image_name" not in ds:
+        missing_fields.append("docker_image or image_name")
+    elif ds.get("docker_image") in [None, ""] and ds.get("image_name") in [None, ""]:
+        missing_fields.append("docker_image or image_name (empty)")
+    
+    # Check for problem statement
+    if "problem_statement" not in ds or ds["problem_statement"] is None or ds["problem_statement"] == "":
+        missing_fields.append("problem_statement")
+    
+    # Check for repository name
+    if "repo_name" not in ds and "repo" not in ds:
+        missing_fields.append("repo_name or repo")
+    elif ds.get("repo_name") in [None, ""] and ds.get("repo") in [None, ""]:
+        missing_fields.append("repo_name or repo (empty)")
+    
+    # Check for commit information (not required for swesmith)
+    docker_image_str = ds.get("docker_image", ds.get("image_name", ""))
+    is_swesmith = "swesmith" in docker_image_str
+    if not is_swesmith:
+        if "parsed_commit" not in ds and "parsed_commit_content" not in ds:
+            missing_fields.append("parsed_commit or parsed_commit_content")
+        elif ds.get("parsed_commit") in [None, ""] and ds.get("parsed_commit_content") in [None, ""]:
+            missing_fields.append("parsed_commit or parsed_commit_content (empty)")
+    
+    # Check for instance_id (used for deduplication)
+    if "instance_id" not in ds or ds["instance_id"] is None or ds["instance_id"] == "":
+        missing_fields.append("instance_id")
+    
+    if missing_fields:
+        error_msg = f"Datapoint missing critical fields: {', '.join(missing_fields)} for Docker image: {docker_image_str}. Skipping to avoid API costs."
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
     assert scaffold in ["r2egym", "sweagent", "openhands"], f"Scaffold is {scaffold}, must be one of [r2egym, sweagent, openhands]"
     # Generate a unique experiment name if not provided
     if exp_name is None:
@@ -463,6 +500,12 @@ def runagent_multiple(
                     if result is not None:
                         with file_lock:
                             f.write(result + "\n")
+                except ValueError as e:
+                    # Handle validation errors (like missing critical fields) separately
+                    if "missing critical fields" in str(e) or "problem_statement" in str(e):
+                        logger.warning(f"Validation error for Docker image {docker_image}: {e}")
+                    else:
+                        logger.error(f"ValueError for Docker image {docker_image}: {e}")
                 except Exception as e:
                     # Use docker_image from above when logging
                     logger.error(f"Exception for Docker image {docker_image}: {e}")
