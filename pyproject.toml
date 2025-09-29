@@ -6,6 +6,9 @@ authors = [
     {name = "Jaskirat Singh", email = "jaskirat.singh@anu.edu.au"},
 ]
 dependencies = [
+    "torch==2.7.1",
+    "vllm==0.10.1",
+    "azure-identity==1.24.0",
     "pandas>=2.2.3",
     "tqdm>=4.66.5",
     "asttokens>=2.4.1",
@@ -31,7 +34,7 @@ dependencies = [
     "anthropic[vertex]==0.43.0",
     "litellm>=1.58.2",
     "google-cloud-aiplatform>=1.77.0",
-    "swebench==3.0.2",
+    "swebench==3.0.15",
     "apscheduler>=3.11.0",
     "sb-cli>=0.1.1",
     "seaborn>=0.13.2",

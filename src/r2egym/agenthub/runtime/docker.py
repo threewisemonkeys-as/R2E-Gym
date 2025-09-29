@@ -1,3 +1,4 @@
+import random
 import os, sys
 import json
 from time import sleep
@@ -43,12 +44,16 @@ from kubernetes import client, config, watch
 # For Kubernetes exec.
 from kubernetes.stream import stream
 
-DEFAULT_NAMESPACE = "default"
+DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+KUBE_CONFIG_PATH = os.environ.get("KUBE_CONFIG_PATH", None)
+KUBE_POD_AFFINITY_MODE = os.environ.get("KUBE_POD_AFFINITY_MODE", "host_only")
+KUBE_DOCKER_SECRET_NAME = os.environ.get("KUBE_DOCKER_SECRET_NAME", "dockerhub-pro")
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
     END_TEST_OUTPUT,
+    FAIL_ONLY_REPOS,
     FAIL_TO_FAIL,
     FAIL_TO_PASS,
     KEY_INSTANCE_ID,
@@ -65,7 +70,7 @@ from swebench.harness.constants import (
     TestStatus,
 )
 from swebench.harness.test_spec.test_spec import TestSpec
-from swebench.harness.log_parsers import MAP_REPO_TO_PARSER, get_eval_type
+from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.grading import get_eval_tests_report, get_resolution_status
 
 
@@ -108,7 +113,7 @@ class DockerRuntime(ExecutionEnvironment):
         self.swebench_verified = "swebench" in self.docker_image
         self.swesmith = "swesmith" in self.docker_image
         if self.swesmith:
-            image_name = self.ds['image_name'].replace('__', '_1776_')
+            image_name = ds_image.replace('__', '_1776_')
             self.swebench_verified = False
             self.docker_image = f'jyangballin/{image_name}:latest'
         
@@ -145,11 +150,10 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "docker":
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
-            # Try in-cluster config first, fallback to kubeconfig
-            try:
+            if KUBE_CONFIG_PATH is None:
                 config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            else:
+                config.load_kube_config(config_file=KUBE_CONFIG_PATH)
             self.client = client.CoreV1Api()
 
         # Start the container
@@ -161,7 +165,7 @@ class DockerRuntime(ExecutionEnvironment):
         self.start_container(
             self.docker_image, command, self.container_name, **docker_kwargs
         )
-
+        
         # Initialize the environment
         self.setup_env()
         if self.backend == "kubernetes":
@@ -234,11 +238,14 @@ class DockerRuntime(ExecutionEnvironment):
 
         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
+        current_node = os.environ["HOSTNAME"]
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {"name": pod_name},
             "spec": {
+                "activeDeadlineSeconds": 3600 + 120,  # 60min timeout + buffer
+                "terminationGracePeriodSeconds": 30,
                 "restartPolicy": "Never",
                 "containers": [
                     {
@@ -250,26 +257,58 @@ class DockerRuntime(ExecutionEnvironment):
                         "tty": True,
                         "env": env_spec,
                         "resources": {
-                            "requests": {"cpu": "1", "memory": "1Gi"},
+                            "requests": {"cpu": "250m", "memory": "250Mi"},
                         },
                     }
                 ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "nodeSelector": {"karpenter.sh/nodepool": "bigcpu-standby"},
+                "imagePullSecrets": [{"name": KUBE_DOCKER_SECRET_NAME}],
                 "tolerations": [
                     {
                         "key": "node.kubernetes.io/disk-pressure",
                         "operator": "Exists",
                         "effect": "NoExecute",
                         "tolerationSeconds": 10800
-                    }
+                    },
+                    {
+                        "key": "kubernetes.azure.com/scalesetpriority",
+                        "operator": "Equal",
+                        "value": "spot",
+                        "effect": "NoSchedule"
+                    },
+                    {
+                        "key": "CriticalAddonsOnly",
+                        "operator": "Exists"
+                    },
                 ],
             },
         }
 
+        if KUBE_POD_AFFINITY_MODE == "host_only":
+            pod_body["spec"]["affinity"] = {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "kubernetes.io/hostname",
+                                        "operator": "In",
+                                        "values": [current_node]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        elif KUBE_POD_AFFINITY_MODE == "unrestricted":
+            pass
+        else:
+            raise RuntimeError(f"Unknown value of KUBE_POD_AFFINITY_MODE: {KUBE_POD_AFFINITY_MODE}")
+
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
-        max_retries = 5
-        backoff = 5  # seconds
+        max_retries = 50
+        backoff = random.uniform(5, 10)  # seconds
         pod = None
         for attempt in range(1, max_retries + 1):
             try:
@@ -286,7 +325,7 @@ class DockerRuntime(ExecutionEnvironment):
                         f"retrying in {backoff}s"
                     )
                     time.sleep(backoff)
-                    backoff = min(backoff * 2, 60)
+                    backoff = min(backoff * 2, 240)
                     continue
                 # Non-retryable error → propagate
                 self.logger.error(f"Failed to create Kubernetes pod '{pod_name}': {e}")
@@ -463,17 +502,127 @@ class DockerRuntime(ExecutionEnvironment):
              os.path.basename(f).startswith('test_') and os.path.basename(f).endswith('.py') or
              os.path.basename(f).endswith('_test.py')]
         commit_id = self.ds['base_commit']
-        reset_command = (
-            f'printf "%s\\n" {" ".join(all_files)} | '
-            f'xargs -n1 -I{{}} git checkout {commit_id} -- "{{}}" 2>/dev/null'
-        )
-        self.run(reset_command)
+        
+        if not all_files:
+            self.logger.info("No test files to reset")
+            return
+            
+        self.logger.info(f"Resetting {len(all_files)} test files to commit {commit_id}")
+        
+        # Use a simpler approach that works with /bin/sh
+        # Reset each file individually with proper error handling
+        files_reset = 0
+        files_skipped = 0
+        
+        for file_path in all_files:
+            import shlex
+            escaped_file = shlex.quote(file_path)
+            escaped_commit = shlex.quote(commit_id)
+            
+            # Check if file exists in the commit first
+            check_command = f'git ls-tree {escaped_commit} -- {escaped_file}'
+            check_result = self.run(check_command)
+            
+            # Ensure we got a valid result from self.run()
+            if check_result is None:
+                self.logger.warning(f"Failed to check if {file_path} exists in commit {commit_id}")
+                files_skipped += 1
+                continue
+                
+            check_output, check_error = check_result
+            
+            # If git ls-tree returned successfully and has output, the file exists
+            if check_error == "0" and check_output.strip():
+                reset_command = f'git checkout {escaped_commit} -- {escaped_file}'
+                reset_result = self.run(reset_command)
+                
+                if reset_result is None:
+                    self.logger.warning(f"Failed to reset {file_path}")
+                    files_skipped += 1
+                    continue
+                    
+                reset_output, reset_error = reset_result
+                
+                if reset_error == "0":
+                    self.logger.debug(f"Reset {file_path} to commit {commit_id}")
+                    files_reset += 1
+                else:
+                    self.logger.debug(f"Could not reset {file_path}: {reset_output}")
+                    files_skipped += 1
+            else:
+                self.logger.debug(f"File {file_path} not found in commit {commit_id}, skipping")
+                files_skipped += 1
+                
+        self.logger.info(f"Test files reset completed: {files_reset} reset, {files_skipped} skipped")
 
     def setup_env_swesmith(self):
         try:
             commit_id = self.ds['base_commit']
             self.run("git fetch")
             self.run(f"git checkout {commit_id}")
+            # Setup the run_test.sh script for subsequent testing.  
+            test_command, _ = get_test_command(self.ds)
+            eval_script_content = "\n".join(
+                [
+                    "#!/bin/bash",
+                    "set -uxo pipefail",
+                    "source /opt/miniconda3/bin/activate",
+                    f"conda activate testbed",
+                    f"cd testbed/",
+                    f": '>>>>> Start Test Output'",
+                    test_command,
+                    f": '>>>>> End Test Output'",
+                ]
+            ) + "\n"
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+                temp_file.write(eval_script_content)
+                temp_file.flush()  # Ensure content is written to disk
+                temp_file_path = temp_file.name
+            
+            # Copy the file to container and clean up
+            self.copy_to_container(temp_file_path, "/run_tests.sh")
+            os.unlink(temp_file_path)  # Clean up the temporary file
+            
+            self.run("chmod +x /run_tests.sh")
+
+            # Ensure can call and execute the tools in /usr/local/bin.
+            self.run(f"ln -s /opt/miniconda3/envs/testbed /root/.venv")
+            self.run('echo \'export PATH="/usr/local/bin:$PATH"\' >> ~/.bashrc')
+            self.run("python -m pip install chardet")
+        except Exception as e:
+            self.logger.error(f"Error setting up environment: {repr(e)}")
+    
+    def update_repo(self):
+        patch_content = self.ds['patch']
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+            temp_file.write(patch_content)
+            temp_file.flush()  # Ensure content is written to disk
+            temp_file_path = temp_file.name
+            
+            
+        # Copy the file to container and clean up
+        self.copy_to_container(temp_file_path, "/bug_patch.diff")
+        os.unlink(temp_file_path)  # Clean up the temporary file
+
+        self.run("git apply /bug_patch.diff")
+        
+        # Check what changes were made
+        diff_output, diff_error = self.run("git diff")
+        if diff_error != "0":
+            self.logger.error(f"Failed to get diff: {diff_output}")
+            raise RuntimeError(f"Failed to apply patch. Git diff returned exit code {diff_error}: {diff_output}")
+        else:
+            self.logger.info(f"Applied patch resulted in diff:\n{diff_output[:500]}...")  # Log first 500 chars
+        # print(f"Applied patch resulted in: {diff_output[:500]}")
+
+    def setup_env_synthetic_bugs(self):
+        try:
+            commit_id = self.ds['base_commit']
+            self.run("git fetch")
+            self.run(f"git checkout {commit_id}")
+            
+            self.update_repo()
             # Setup the run_test.sh script for subsequent testing.  
             test_command, _ = get_test_command(self.ds)
             eval_script_content = "\n".join(
@@ -539,7 +688,7 @@ class DockerRuntime(ExecutionEnvironment):
         if self.swebench_verified:
             return self.setup_env_swebench()
         elif self.swesmith:
-            return self.setup_env_swesmith()
+            return self.setup_env_synthetic_bugs()
 
         try:
             # setup venv
@@ -572,19 +721,25 @@ class DockerRuntime(ExecutionEnvironment):
 
             self.run("find . -name '__pycache__' -exec rm -rf {} +")
 
-            # also delete pycache and pyc from /r2e_tests
-            self.run("find /r2e_tests -name '*.pyc' -delete")
-            self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
+            # also delete pycache and pyc from /r2e_tests (if it exists)
+            test_dir_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in test_dir_check:
+                self.run("find /r2e_tests -name '*.pyc' -delete")
+                self.run("find /r2e_tests -name '__pycache__' -exec rm -rf {} +")
 
             # move all skip files (if present) to /root
             for skip_file in SKIP_FILES_NEW:
-                self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
+                # Check if skip file exists before trying to move it
+                skip_file_check, _ = self.run(f"test -f {self.repo_path}/{skip_file} && echo 'exists' || echo 'not found'")
+                if "exists" in skip_file_check:
+                    self.run(f"mv {self.repo_path}/{skip_file} {self.alt_path}/{skip_file}")
 
-            # r2e_tests are in the / directory, move them to /root
-            self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
-
-            # make a softlink for /root/r2e_tests (if present)
-            self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
+            # r2e_tests are in the / directory, move them to /root (if they exist)
+            r2e_tests_check, _ = self.run("test -d /r2e_tests && echo 'exists' || echo 'not found'")
+            if "exists" in r2e_tests_check:
+                self.run(f"mv /r2e_tests {self.alt_path}/r2e_tests")
+                # make a softlink for /root/r2e_tests
+                self.run(f"ln -s {self.alt_path}/r2e_tests {self.repo_path}/r2e_tests")
             # self.run(f"ln -s /r2e_tests {self.repo_path}/r2e_tests")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
@@ -797,8 +952,8 @@ class DockerRuntime(ExecutionEnvironment):
         tar_stream.seek(0)
 
         # Retry with exponential backoff
-        max_retries = 5
-        retry_delay = 5  # Initial delay in seconds
+        max_retries = 50
+        retry_delay = random.uniform(1, 30)  # Random initial delay between 1 and 30 seconds
         for attempt in range(max_retries):
             try:
                 # Exec into pod to untar into the destination directory
@@ -823,7 +978,7 @@ class DockerRuntime(ExecutionEnvironment):
                     self.logger.warning(f"Copy to container failed (attempt {attempt+1}/{max_retries}): {str(e)}")
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
-                    retry_delay = min(retry_delay, 60)
+                    retry_delay = min(retry_delay, 240)
                     tar_stream.seek(0)  # Reset the stream for the next attempt
                 else:
                     self.logger.error(f"Copy to container failed after {max_retries} attempts: {str(e)}")
@@ -980,32 +1135,43 @@ class DockerRuntime(ExecutionEnvironment):
         pass2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['PASS_TO_PASS']]
         # @(Naman, Jas): Parse the output and return the reward. This implementation is a hack rn.
         if not parse:
-            return 0.0
+            reward = 0.0
+        else:
+            reward = 1.0
+            # Check fail2pass
+            for test_name in fail2pass:
+                if test_name not in parse:
+                    # Check if test_name is substring of any key
+                    matching_key = next((k for k in parse.keys() if test_name in k), None)
+                    if matching_key is None:
+                        reward = 0.0
+                        break
+                    if parse[matching_key] != 'PASSED':
+                        reward = 0.0
+                        break
+                    test_name = matching_key
+                if parse[test_name] != 'PASSED':
+                    reward = 0.0
+                    break
+            
+            # Check pass2pass only if fail2pass tests passed
+            if reward == 1.0:
+                for test_name in pass2pass:
+                    if test_name not in parse:
+                        # Check if test_name is substring of any key
+                        matching_key = next((k for k in parse.keys() if test_name in k), None)
+                        if matching_key is None:
+                            reward = 0.0
+                            break
+                        test_name = matching_key
+                    if parse[test_name] != 'PASSED':
+                        reward = 0.0
+                        break
         
-        # Check fail2pass
-        for test_name in fail2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                if parse[matching_key] != 'PASSED':
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        
-        # Check pass2pass
-        for test_name in pass2pass:
-            if test_name not in parse:
-                # Check if test_name is substring of any key
-                matching_key = next((k for k in parse.keys() if test_name in k), None)
-                if matching_key is None:
-                    return 0.0
-                test_name = matching_key
-            if parse[test_name] != 'PASSED':
-                return 0.0
-        return 1.0
+        # If the caller wants the test output as well, return (reward, output)
+        if get_test_output:
+            return reward, output
+        return reward
 
 
     def _calculate_reward_swebench(self, get_test_output=False, timeout: int = 300) -> float:
@@ -1020,8 +1186,10 @@ class DockerRuntime(ExecutionEnvironment):
             FAIL_TO_PASS: self.test_spec.FAIL_TO_PASS,
             PASS_TO_PASS: self.test_spec.PASS_TO_PASS,
         }
+        eval_type = EvalType.FAIL_ONLY if self.test_spec.repo in FAIL_ONLY_REPOS \
+            else EvalType.PASS_AND_FAIL
         report = get_eval_tests_report(
-            eval_status_map, eval_ref, eval_type=get_eval_type(self.test_spec)
+            eval_status_map, eval_ref, eval_type=eval_type
         )
         success = get_resolution_status(report) == ResolvedStatus.FULL.value
         if get_test_output:

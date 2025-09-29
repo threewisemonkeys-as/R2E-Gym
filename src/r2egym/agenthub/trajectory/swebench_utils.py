@@ -1,10 +1,11 @@
 from swebench.harness.test_spec.test_spec import make_test_spec, TestSpec
-from swebench.harness.log_parsers import MAP_REPO_TO_PARSER, get_eval_type
+from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.grading import get_eval_tests_report, get_resolution_status
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
     END_TEST_OUTPUT,
+    FAIL_ONLY_REPOS,
     FAIL_TO_FAIL,
     FAIL_TO_PASS,
     KEY_INSTANCE_ID,
@@ -75,8 +76,11 @@ def swebench_report(ds, test_output):
         FAIL_TO_PASS: test_spec.FAIL_TO_PASS,
         PASS_TO_PASS: test_spec.PASS_TO_PASS,
     }
+    eval_type = EvalType.FAIL_ONLY if test_spec.repo in FAIL_ONLY_REPOS \
+        else EvalType.PASS_AND_FAIL
+
     report = get_eval_tests_report(
-        eval_status_map, eval_ref, eval_type=get_eval_type(test_spec)
+        eval_status_map, eval_ref, eval_type=eval_type
     )
     return report
 
