@@ -58,9 +58,10 @@ class AgentArgs:
 class Agent:
     """Agent handles the behavior of the model and how it interacts with the environment."""
 
-    def __init__(self, name: str, args: AgentArgs, logger=None):
+    def __init__(self, name: str, args: AgentArgs, logger=None, litellm_completion_kwargs: dict | None = None):
         self.name = name
         self.args = args
+        self.litellm_completion_kwargs = dict() if litellm_completion_kwargs is None else litellm_completion_kwargs
         # self.trajectory_steps: List[TrajectoryStep] = []
         if logger is None:
             self.logger = get_logger(name)  # initialize logger from the agent name
@@ -209,6 +210,7 @@ class Agent:
                     api_base=self.llm_base_url,
                     # max_tokens=3000,
                     **kwargs,
+                    **self.litellm_completion_kwargs,
                 )
                 self.logger.warning(f"Querying LLM complete")
                 break
