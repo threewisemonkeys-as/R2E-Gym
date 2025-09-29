@@ -108,7 +108,7 @@ class DockerRuntime(ExecutionEnvironment):
         self.swebench_verified = "swebench" in self.docker_image
         self.swesmith = "swesmith" in self.docker_image
         if self.swesmith:
-            image_name = self.ds['image_name'].replace('__', '_1776_')
+            image_name = ds_image.replace('__', '_1776_')
             self.swebench_verified = False
             self.docker_image = f'jyangballin/{image_name}:latest'
         
@@ -161,7 +161,7 @@ class DockerRuntime(ExecutionEnvironment):
         self.start_container(
             self.docker_image, command, self.container_name, **docker_kwargs
         )
-
+        
         # Initialize the environment
         self.setup_env()
         if self.backend == "kubernetes":
@@ -506,6 +506,69 @@ class DockerRuntime(ExecutionEnvironment):
             self.run("python -m pip install chardet")
         except Exception as e:
             self.logger.error(f"Error setting up environment: {repr(e)}")
+    
+    def update_repo(self):
+        patch_content = self.ds['patch']
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+            temp_file.write(patch_content)
+            temp_file.flush()  # Ensure content is written to disk
+            temp_file_path = temp_file.name
+            
+            
+        # Copy the file to container and clean up
+        self.copy_to_container(temp_file_path, "/bug_patch.diff")
+        os.unlink(temp_file_path)  # Clean up the temporary file
+
+        self.run("git apply /bug_patch.diff")
+        
+        # Check what changes were made
+        diff_output, diff_error = self.run("git diff")
+        if diff_error != "0":
+            self.logger.error(f"Failed to get diff: {diff_output}")
+            raise RuntimeError(f"Failed to apply patch. Git diff returned exit code {diff_error}: {diff_output}")
+        else:
+            self.logger.info(f"Applied patch resulted in diff:\n{diff_output[:500]}...")  # Log first 500 chars
+        print(f"Applied patch resulted in: {diff_output[:500]}")
+
+    def setup_env_synthetic_bugs(self):
+        try:
+            commit_id = self.ds['base_commit']
+            self.run("git fetch")
+            self.run(f"git checkout {commit_id}")
+            
+            self.update_repo()
+            # Setup the run_test.sh script for subsequent testing.  
+            test_command, _ = get_test_command(self.ds)
+            eval_script_content = "\n".join(
+                [
+                    "#!/bin/bash",
+                    "set -uxo pipefail",
+                    "source /opt/miniconda3/bin/activate",
+                    f"conda activate testbed",
+                    f"cd testbed/",
+                    f": '>>>>> Start Test Output'",
+                    test_command,
+                    f": '>>>>> End Test Output'",
+                ]
+            ) + "\n"
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
+                temp_file.write(eval_script_content)
+                temp_file.flush()  # Ensure content is written to disk
+                temp_file_path = temp_file.name
+            
+            # Copy the file to container and clean up
+            self.copy_to_container(temp_file_path, "/run_tests.sh")
+            os.unlink(temp_file_path)  # Clean up the temporary file
+            
+            self.run("chmod +x /run_tests.sh")
+
+            # Ensure can call and execute the tools in /usr/local/bin.
+            self.run(f"ln -s /opt/miniconda3/envs/testbed /root/.venv")
+            self.run('echo \'export PATH="/usr/local/bin:$PATH"\' >> ~/.bashrc')
+            self.run("python -m pip install chardet")
+        except Exception as e:
+            self.logger.error(f"Error setting up environment: {repr(e)}")
 
     def setup_env_swebench(self):
         try:
@@ -539,7 +602,7 @@ class DockerRuntime(ExecutionEnvironment):
         if self.swebench_verified:
             return self.setup_env_swebench()
         elif self.swesmith:
-            return self.setup_env_swesmith()
+            return self.setup_env_synthetic_bugs()
 
         try:
             # setup venv
