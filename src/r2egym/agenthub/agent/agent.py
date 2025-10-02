@@ -58,7 +58,7 @@ class AgentArgs:
 class Agent:
     """Agent handles the behavior of the model and how it interacts with the environment."""
 
-    def __init__(self, name: str, args: AgentArgs, logger=None):
+    def __init__(self, name: str, args: AgentArgs, logger=None, litellm_completion_kwargs: dict | None = None):
         self.name = name
         self.args = args
         # self.trajectory_steps: List[TrajectoryStep] = []
@@ -67,6 +67,7 @@ class Agent:
         else:
             self.logger = logger
         self.llm_name = args.llm_name
+        self.litellm_completion_kwargs = dict() if litellm_completion_kwargs is None else litellm_completion_kwargs
 
         self.llm_base_url = (
             # "http://localhost:8000/v1"
@@ -206,8 +207,9 @@ class Agent:
                     tools=tools,
                     messages=messages_,
                     timeout=self.llm_timeout,
-                    api_base=self.llm_base_url,
+                    # api_base=self.llm_base_url,
                     # max_tokens=3000,
+                    **self.litellm_completion_kwargs,
                     **kwargs,
                 )
                 self.logger.warning(f"Querying LLM complete")
@@ -348,13 +350,13 @@ class Agent:
         # Prepare problem_statement and structure from the environment
         problem_statement = env.runtime.get_task_instruction()
         self.logger.info(f"Problem Statement: {problem_statement}")
-        gt_patch = env.runtime.commit.get_patch(test_file=True, non_test_file=False)
+        # gt_patch = env.runtime.commit.get_patch(test_file=True, non_test_file=False)
 
         # get system and instance prompts
         system_prompt = self.system_prompt_template
         user_prompt = self.instance_prompt_template.format(
             problem_statement=problem_statement,
-            gt_patch=gt_patch,
+            # gt_patch=gt_patch,
             working_dir='/testbed',
             # base_commit=env.runtime.ds['base_commit'],
             test_patch_hint=metadata.get("test_patch_hint", ""),
