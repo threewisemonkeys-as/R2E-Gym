@@ -150,12 +150,12 @@ class Agent:
         if total_tokens <= history_cutoff:
             return messages
 
-        # take first three messages
-        head = messages[:3]
+        # always keep the first three messages
+        head = messages[:4]
         # Include first 3 messages + last (cutoff-3) messages up to current position
         trimmed_context = []
         total_tokens = self._count_tokens(head)
-        for msg in reversed(messages[3:]):
+        for msg in reversed(messages[4:]):
             num_tokens = self._count_tokens([msg])
             if total_tokens + num_tokens > history_cutoff:
                 break
@@ -238,7 +238,7 @@ class Agent:
             messages: List of message dictionaries for the conversation
             temperature: Temperature for response generation
             k_responses: Number of responses to generate (default=1 for backward compatibility)
-            
+
         Returns:
             Tuple of (list of responses, execution time). When k_responses=1, returns ([single_response], exec_time)
         """
@@ -904,10 +904,15 @@ class Agent:
 
             # Query the LLM
             messages = copy.deepcopy(self.history)
-            if history_token_cutoff > 0 and len(messages) > 3:
+            if history_token_cutoff > 0 and len(messages) > 4:
                 self.logger.info(f"Applying history token cutoff: {history_token_cutoff}!")
                 self.logger.info(f"Total messages before cutoff: {len(messages)}")
                 messages = self._history_cutoff(messages, history_token_cutoff)
+                self.logger.info(f"Total messages after cutoff: {len(messages)}")
+            elif self._count_tokens(messages) > max_token_limit - 500:  # here we give a slight buffer cauz litellm doesn't estimate the correct amount (underestimates)
+                self.logger.info(f"History exceeds max token limit: {max_token_limit}!")
+                self.logger.info(f"Total messages before cutoff: {len(messages)}")
+                messages = self._history_cutoff(messages, max_token_limit - 500)
                 self.logger.info(f"Total messages after cutoff: {len(messages)}")
 
             try:
