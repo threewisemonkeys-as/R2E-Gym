@@ -569,6 +569,9 @@ class DockerRuntime(ExecutionEnvironment):
     
     def update_repo(self):
         patch_content = self.ds['patch']
+        if not patch_content or not patch_content.strip():
+            self.logger.info("No patch content provided; skipping git apply.")
+            return
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.sh') as temp_file:
             temp_file.write(patch_content)
             temp_file.flush()  # Ensure content is written to disk
