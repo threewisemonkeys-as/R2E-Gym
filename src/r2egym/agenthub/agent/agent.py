@@ -924,6 +924,8 @@ class Agent:
 
             if self.use_fn_calling:
                 thought, action = self.custom_parser(response)
+            elif "capi-claude-sonnet-4" in self.llm_name:
+                alt_thought, alt_action = self.parse_response_v2(alt_message)
             elif "capi-" in self.llm_name or "trapi-" in self.llm_name:
                 thought, action = self.parse_response(assistant_message)
             else:
@@ -936,8 +938,10 @@ class Agent:
                         if self.use_fn_calling:
                             alt_thought, alt_action = self.custom_parser(alt_resp)
                         else:
-                            alt_message = alt_resp.choices[0].message.content if hasattr(alt_resp, 'choices') and alt_resp.choices else ""
-                            if "capi-" in self.llm_name or "trapi-" in self.llm_name:
+                            alt_message = alt_resp.choices[0].message.content if hasattr(alt_resp, 'choices') and alt_resp.choices else ""              
+                            if "capi-claude-sonnet-4" in self.llm_name:
+                                alt_thought, alt_action = self.parse_response_v2(alt_message)
+                            elif "capi-" in self.llm_name or "trapi-" in self.llm_name:
                                 alt_thought, alt_action = self.parse_response(alt_message)
                             else:
                                 alt_thought, alt_action = self.parse_response_v2(alt_message)
