@@ -58,7 +58,7 @@ class Trajectory(BaseModel):
     ##############################
     # problem metadata
     ##############################
-    problem_statement: str
+    problem_statement: Optional[str] = "No problem statement available"
     docker_image: str
     exp_name: Optional[str] = None  # experiment name
 
