@@ -47,6 +47,8 @@ from kubernetes.stream import stream
 
 DEFAULT_NAMESPACE = os.environ.get("K8S_NAMESPACE", "default")
 DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+KUBE_CONFIG_PATH = os.environ.get("KUBE_CONFIG_PATH", None)
+
 
 from swebench.harness.constants import (
     APPLY_PATCH_FAIL,
@@ -148,11 +150,10 @@ class DockerRuntime(ExecutionEnvironment):
         if self.backend == "docker":
             self.client = docker.from_env(timeout=120)
         elif self.backend == "kubernetes":
-            # Try in-cluster config first, fallback to kubeconfig
-            try:
+            if KUBE_CONFIG_PATH is None:
                 config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            else:
+                config.load_kube_config(config_file=KUBE_CONFIG_PATH)
             self.client = client.CoreV1Api()
 
         # Start the container
@@ -237,82 +238,92 @@ class DockerRuntime(ExecutionEnvironment):
 
         env_vars = {"PATH": DOCKER_PATH, **docker_kwargs.get("environment", {})}
         env_spec = [{"name": k, "value": str(v)} for k, v in env_vars.items()]
-        current_node = os.environ["HOSTNAME"]
+        current_node = os.environ.get("HOSTNAME", "unknown")
         job_id = os.environ.get("JOB_ID", "cai-job")
 
-        # ray.init(address="auto")
-        node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
-        
-        random.shuffle(node_names)  # Shuffle to distribute load randomly
-        
-        # pick one node name at random
-        node_name = random.sample(node_names, 1)[0]
-        print("Selected node for pod placement:", node_name)
+        # Try to use Ray for node selection if available, otherwise use Kubernetes default scheduling
+        node_name = None
+        try:
+            if ray.is_initialized():
+                node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
+                if node_names:
+                    random.shuffle(node_names)
+                    node_name = random.sample(node_names, 1)[0]
+                    self.logger.info(f"Selected node for pod placement via Ray: {node_name}")
+        except Exception as e:
+            self.logger.warning(f"Could not use Ray for node selection: {e}. Using Kubernetes default scheduling.")
+            node_name = None
+
+        # Build pod spec
+        pod_spec = {
+            "activeDeadlineSeconds": 5400 + 120,  # 90min timeout + buffer
+            "terminationGracePeriodSeconds": 30,
+            "restartPolicy": "Never",
+            "containers": [
+                {
+                    "name": pod_name,
+                    "image": docker_image,
+                    "command": ["/bin/sh", "-c"],
+                    "args": [command] if isinstance(command, str) else command,
+                    "stdin": True,
+                    "tty": True,
+                    "env": env_spec,
+                    "resources": {
+                        "requests": {"cpu": "250m", "memory": "250Mi"},
+                    },
+                }
+            ],
+            "imagePullSecrets": [{"name": "dockerhub-pro"}],
+            "tolerations": [
+                {
+                    "key": "node.kubernetes.io/disk-pressure",
+                    "operator": "Exists",
+                    "effect": "NoExecute",
+                    "tolerationSeconds": 10800
+                },
+                {
+                    "key": "kubernetes.azure.com/scalesetpriority",
+                    "operator": "Equal",
+                    "value": "spot",
+                    "effect": "NoSchedule"
+                },
+                {
+                    "key": "CriticalAddonsOnly",
+                    "operator": "Exists"
+                },
+            ],
+        }
+
+        # Add node affinity only if a specific node was selected
+        if node_name:
+            pod_spec["affinity"] = {
+                "nodeAffinity": {
+                    "requiredDuringSchedulingIgnoredDuringExecution": {
+                        "nodeSelectorTerms": [
+                            {
+                                "matchExpressions": [
+                                    {
+                                        "key": "kubernetes.io/hostname",
+                                        "operator": "In",
+                                        "values": [node_name]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
 
         pod_body = {
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {
-                "name": pod_name, 
+                "name": pod_name,
                 "labels": {
                     "job_id": job_id
                 }
             },
-            "spec": {
-                "activeDeadlineSeconds": 5400 + 120,  # 90min timeout + buffer
-                "terminationGracePeriodSeconds": 30,
-                "restartPolicy": "Never",
-                "affinity": {
-                    "nodeAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                            "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "kubernetes.io/hostname",
-                                            "operator": "In",
-                                            "values": [node_name]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                },
-                "containers": [
-                    {
-                        "name": pod_name,
-                        "image": docker_image,
-                        "command": ["/bin/sh", "-c"],
-                        "args": [command] if isinstance(command, str) else command,
-                        "stdin": True,
-                        "tty": True,
-                        "env": env_spec,
-                        "resources": {
-                            "requests": {"cpu": "250m", "memory": "250Mi"},
-                        },
-                    }
-                ],
-                "imagePullSecrets": [{"name": "dockerhub-pro"}],
-                "tolerations": [
-                    {
-                        "key": "node.kubernetes.io/disk-pressure",
-                        "operator": "Exists",
-                        "effect": "NoExecute",
-                        "tolerationSeconds": 10800
-                    },
-                    {
-                        "key": "kubernetes.azure.com/scalesetpriority",
-                        "operator": "Equal",
-                        "value": "spot",
-                        "effect": "NoSchedule"
-                    },
-                    {
-                        "key": "CriticalAddonsOnly",
-                        "operator": "Exists"
-                    },
-                ],
-            },
+            "spec": pod_spec,
         }
 
         # Create the Pod with retry logic & efficiently monitor with K8 Watch
@@ -371,6 +382,11 @@ class DockerRuntime(ExecutionEnvironment):
                     raise RuntimeError(
                         f"Kubernetes pod '{pod_name}' entered terminal phase '{phase}'."
                     )
+
+            # Wait for pod to be fully ready for exec (avoid 404 errors)
+            self.logger.info(f"Waiting for pod '{pod_name}' to be ready for exec commands...")
+            time.sleep(5)  # Give pod time to fully initialize exec endpoint
+
             self.container = pod
         except client.ApiException as create_error:
             self.logger.error(
