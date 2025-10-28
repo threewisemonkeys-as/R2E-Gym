@@ -246,16 +246,17 @@ class DockerRuntime(ExecutionEnvironment):
 
         # Try to use Ray for node selection if available, otherwise use Kubernetes default scheduling
         node_name = None
-        try:
-            if ray.is_initialized():
-                node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
-                if node_names:
-                    random.shuffle(node_names)
-                    node_name = random.sample(node_names, 1)[0]
-                    self.logger.info(f"Selected node for pod placement via Ray: {node_name}")
-        except Exception as e:
-            self.logger.warning(f"Could not use Ray for node selection: {e}. Using Kubernetes default scheduling.")
-            node_name = None
+        if KUBE_CONFIG_PATH is None:
+            try:
+                if ray.is_initialized():
+                    node_names = [node["NodeManagerHostname"] for node in ray.nodes()]
+                    if node_names:
+                        random.shuffle(node_names)
+                        node_name = random.sample(node_names, 1)[0]
+                        self.logger.info(f"Selected node for pod placement via Ray: {node_name}")
+            except Exception as e:
+                self.logger.warning(f"Could not use Ray for node selection: {e}. Using Kubernetes default scheduling.")
+                node_name = None
 
         # Build pod spec
         pod_spec = {
