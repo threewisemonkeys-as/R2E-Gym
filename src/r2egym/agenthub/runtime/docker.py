@@ -152,8 +152,10 @@ class DockerRuntime(ExecutionEnvironment):
         elif self.backend == "kubernetes":
             if KUBE_CONFIG_PATH is None:
                 config.load_incluster_config()
+                print("Loading kubernetes incluster config since KUBE_CONFIG_PATH is not set")
             else:
                 config.load_kube_config(config_file=KUBE_CONFIG_PATH)
+                print(f"Loading kubernetes external config from {KUBE_CONFIG_PATH}") 
             self.client = client.CoreV1Api()
 
         # Start the container
