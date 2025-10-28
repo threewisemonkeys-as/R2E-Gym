@@ -162,8 +162,9 @@ class DockerRuntime(ExecutionEnvironment):
         self.container = None
         self.container_name = self._get_container_name(self.docker_image)
         if self.backend == "kubernetes":
-            # Generate a random UUID and truncate to 30 characters
-            self.container_name = str(uuid.uuid4())
+            timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+            unique_id = str(uuid.uuid4())[:8]  # Short UUID segment
+            self.container_name = f"pod-{timestamp}-{unique_id}".lower()
         self.start_container(
             self.docker_image, command, self.container_name, **docker_kwargs
         )
