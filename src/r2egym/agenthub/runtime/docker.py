@@ -1158,14 +1158,17 @@ class DockerRuntime(ExecutionEnvironment):
     def _calculate_reward_swesmith(self, get_test_output=False, timeout: int = 300) -> float:
         self.reset_swesmith_tests()
         output, error_msg = self.run("/run_tests.sh", timeout=timeout)
+        print(output)
         parse = self.parse_logs(output)
         
         fail2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['FAIL_TO_PASS']]
         pass2pass = [ ".".join(line.split("::")[1:]) for line in self.ds['PASS_TO_PASS']]
         # @(Naman, Jas): Parse the output and return the reward. This implementation is a hack rn.
         if not parse:
+            print(f"Could not parse evaluation test output, setting reward to 0")
             reward = 0.0
         else:
+            print(parse)
             reward = 1.0
             # Check fail2pass
             for test_name in fail2pass:
