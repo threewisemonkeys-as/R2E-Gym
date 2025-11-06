@@ -260,7 +260,7 @@ class DockerRuntime(ExecutionEnvironment):
 
         # Build pod spec
         pod_spec = {
-            "activeDeadlineSeconds": 5400 + 120,  # 90min timeout + buffer
+            "activeDeadlineSeconds": 7200,  # 2hrs
             "terminationGracePeriodSeconds": 30,
             "restartPolicy": "Never",
             "containers": [
@@ -982,8 +982,12 @@ class DockerRuntime(ExecutionEnvironment):
 
         # Retry with exponential backoff
         max_retries = 50
+        max_time = 300
+        deadline = time.time() + max_time
         retry_delay = random.uniform(1, 30)  # Random initial delay between 1 and 30 seconds
         for attempt in range(max_retries):
+            if time.time() > deadline:
+                raise RuntimeError(f"copy_to_container exceeded max allowed time of {max_time} seconds")
             try:
                 # Exec into pod to untar into the destination directory
                 exec_command = ["tar", "xmf", "-", "-C", dest_dir]
